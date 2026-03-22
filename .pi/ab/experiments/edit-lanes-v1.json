@@ -1,0 +1,58 @@
+{
+  "id": "edit-lanes-v1",
+  "enabled": true,
+  "target_tool": "edit",
+  "trigger": {
+    "tool": "edit",
+    "sample_rate": 1,
+    "when_path_regex": "^fixtures/ab-test/"
+  },
+  "mode": "deterministic",
+  "lanes": [
+    {
+      "id": "A",
+      "primary": false,
+      "extensions": [
+        "./fixtures/ab-test/lanes/edit-perm-a.ts"
+      ]
+    },
+    {
+      "id": "B",
+      "primary": true,
+      "extensions": [
+        "./fixtures/ab-test/lanes/edit-perm-b.ts"
+      ]
+    },
+    {
+      "id": "C",
+      "primary": false,
+      "extensions": [
+        "./fixtures/ab-test/lanes/edit-perm-c.ts"
+      ]
+    }
+  ],
+  "timeout_ms": 15000,
+  "debug": false,
+  "lane_harness": "direct",
+  "selection": {
+    "deterministic": {
+      "objective": "min(latency_ms)",
+      "tie_breakers": [
+        "max(success)",
+        "min(total_tokens)"
+      ]
+    }
+  },
+  "grading": {
+    "execution": "process",
+    "timeout_ms": 12000,
+    "prompt_file": "./.pi/ab/prompts/grade-default.md"
+  },
+  "failure_policy": {
+    "on_lane_timeout": "exclude_continue",
+    "on_lane_crash": "exclude_continue",
+    "on_grading_failure": "fallback_deterministic_then_shadow",
+    "on_winner_apply_failure": "fallback_primary_then_fail",
+    "all_lanes_failed": "fallback_primary"
+  }
+}

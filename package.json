@@ -1,0 +1,14 @@
+{
+  "name": "pi-ab-wip",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "keywords": ["pi-package"],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./pi-extension/ab/index.ts"]
+  }
+}
