@@ -8,6 +8,7 @@
     "when_path_regex": "^fixtures/ab-test/"
   },
   "mode": "deterministic",
+  "execution_strategy": "fixed_args",
   "lanes": [
     {
       "id": "A",

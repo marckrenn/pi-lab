@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "keywords": ["pi-package"],
+  "scripts": {
+    "typecheck": "bun -e \"await import('./pi-extension/ab/index.ts'); await import('./pi-extension/ab/config.ts'); await import('./pi-extension/ab/runner.ts'); await import('./pi-extension/ab/grading.ts'); await import('./pi-extension/ab/selection.ts'); await import('./pi-extension/ab/winner.ts'); await import('./pi-extension/ab/wizard.ts'); console.log('typecheck-ok')\"",
+    "test": "bun test ./tests"
+  },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@sinclair/typebox": "*"

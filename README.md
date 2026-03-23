@@ -6,16 +6,27 @@ A work-in-progress **pi extension** for A/B/C experimentation of tool+prompt beh
 
 Implemented prototype:
 
-- `edit` override that transparently intercepts when trigger policy matches
+- `edit` override that transparently intercepts when trigger policy matches (`execution_strategy: "fixed_args"`)
+- Generic non-edit interception:
+  - `execution_strategy: "fixed_args"` → transparent override with identical args across lanes
+  - `execution_strategy: "lane_single_call"` → proxy flow with exactly one target-tool call per lane
+  - `execution_strategy: "lane_multi_call"` → proxy flow with lane-specific multi-step replanning (`{ task, context?, constraints? }`)
+  - `target_tool`/`trigger.tool` are real gates
 - Global/project experiment loading with project-overrides-global precedence
 - Setup wizard (`/ab wizard` and `ab_setup_wizard` tool)
-- Lane execution in isolated git worktrees
-  - default `lane_harness: "direct"` (non-LLM direct tool execution)
-  - optional `lane_harness: "pi_prompt"` (legacy prompt-driven subprocess lanes)
+- Lane execution in isolated git worktrees (sandbox for lane side effects)
+  - `execution_strategy: "fixed_args"` (transparent same-args lane execution)
+  - `execution_strategy: "lane_single_call"` (proxy flow; one target-tool call per lane)
+  - `execution_strategy: "lane_multi_call"` (proxy flow; lane-specific multi-step replanning)
+  - default `lane_harness: "direct"` for fixed_args
+  - `lane_harness: "pi_prompt"` for lane_single_call / lane_multi_call
 - Winner selection modes:
   - `shadow`
   - `deterministic`
   - `grading` (separate grader `pi` process)
+  - `hybrid`
+    - `llm_tiebreaker` (LLM breaks deterministic ties)
+    - `llm_score` (injects `{llm_score}` + `{deterministic_score}` into template scoring)
 - Winner patch apply back to main workspace (`git apply` + `--3way` fallback)
 - Run artifacts under `~/.pi/agent/ab/runs/...`
 
@@ -37,9 +48,22 @@ Other debug env flags:
 - `PI_AB_DEBUG_JSON=1` stream JSON event output in panes (off by default for readability)
 - `PI_AB_LANE_HARNESS=direct|pi_prompt` override lane harness per run
 
+Execution strategy notes:
+- `execution_strategy: "fixed_args"` → conductor forwards one canonical call shape to all lanes.
+  - Run manifest telemetry includes schema fairness as `capability_policy: "intersection" | "best_effort"` plus key sets.
+- `execution_strategy: "lane_single_call"` → proxy flow where each lane calls the target tool exactly once (lane-specific schema allowed).
+- `execution_strategy: "lane_multi_call"` → generic meta-tool flow where lanes can receive their own API and replan via `pi_prompt` lane sessions.
+  - Main-lane proxy schema: `{ task, context?, constraints? }`.
+- Grading input can optionally include per-lane tool-call transcripts (`grading.include.tool_calls: true`).
+- Hybrid llm_score supports template formulas via:
+  - `selection.hybrid.final_objective` (e.g. `max({deterministic_score} * 0.6 + {llm_score} * 0.4)`)
+  - `selection.hybrid.final_tie_breakers`
+
 ## Files
 
 - `pi-extension/ab/index.ts` — extension entrypoint, command/tool registrations, orchestration
+- `pi-extension/ab/winner.ts` — winner selection + fallback logic (shadow/deterministic/grading)
+- `pi-extension/ab/gc.ts` — `/ab gc` parsing and retention execution
 - `pi-extension/ab/wizard.ts` — interactive setup wizard
 - `pi-extension/ab/config.ts` — experiment discovery + trigger selection
 - `pi-extension/ab/runner.ts` — worktree lane execution + patch apply helpers

@@ -54,6 +54,72 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+interface SessionMessageEntry {
+  type: "message";
+  timestamp?: string;
+  message: {
+    role: string;
+    toolName?: string;
+    toolCallId?: string;
+    isError?: boolean;
+    content?: Array<{
+      type: string;
+      name?: string;
+      arguments?: Record<string, unknown>;
+      text?: string;
+      toolCallId?: string;
+    }>;
+  };
+}
+
+function laneToolTranscript(sessionFile: string | undefined): Array<Record<string, unknown>> {
+  if (!sessionFile || !existsSync(sessionFile)) return [];
+
+  const lines = readFileSync(sessionFile, "utf8")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const transcript: Array<Record<string, unknown>> = [];
+  for (const line of lines) {
+    const parsed = safeJsonParse<SessionMessageEntry>(line);
+    if (!parsed || parsed.type !== "message") continue;
+
+    if (parsed.message.role === "assistant") {
+      for (const block of parsed.message.content ?? []) {
+        if (block.type !== "toolCall") continue;
+        transcript.push({
+          type: "tool_call",
+          tool_name: block.name,
+          tool_call_id: block.toolCallId,
+          arguments: block.arguments,
+          timestamp: parsed.timestamp,
+        });
+      }
+      continue;
+    }
+
+    if (parsed.message.role === "toolResult") {
+      const text = (parsed.message.content ?? [])
+        .filter((b) => b.type === "text" && typeof b.text === "string")
+        .map((b) => b.text)
+        .join("\n")
+        .trim();
+
+      transcript.push({
+        type: "tool_result",
+        tool_name: parsed.message.toolName,
+        tool_call_id: parsed.message.toolCallId,
+        is_error: parsed.message.isError === true,
+        text: text || undefined,
+        timestamp: parsed.timestamp,
+      });
+    }
+  }
+
+  return transcript;
+}
+
 function validateGradingResult(
   value: unknown,
   lanes: LaneRunRecord[],
@@ -102,6 +168,9 @@ function validateGradingResult(
       }
       if (typeof score !== "number" || !Number.isFinite(score)) {
         return { ok: false, error: `scores[].score for lane '${laneId}' must be a finite number.` };
+      }
+      if (score < 0 || score > 1) {
+        return { ok: false, error: `scores[].score for lane '${laneId}' must be within [0,1].` };
       }
       if (reason !== undefined && typeof reason !== "string") {
         return { ok: false, error: `scores[].reason for lane '${laneId}' must be a string when provided.` };
@@ -193,22 +262,30 @@ export async function runGradingProcess(
   run: RunContext,
   cwd: string,
   lanes: LaneRunRecord[],
-  args: { path: string; oldText: string; newText: string },
+  args: { intercepted_tool: string; intercepted_args: Record<string, unknown> },
   currentModel: { provider?: string; id?: string } | undefined,
   signal?: AbortSignal,
 ): Promise<{ result: GradingResult | null; error?: string; error_code?: GradingErrorCode }> {
   const promptText = loadGradingPrompt(loaded, cwd);
-  const gradingInput = {
+  const includeToolCalls =
+    loaded.experiment.grading?.include?.tool_calls ??
+    loaded.experiment.selection?.grading?.include?.tool_calls ??
+    false;
+
+  const gradingInput: Record<string, unknown> = {
     experiment_id: loaded.experiment.id,
     mode: loaded.experiment.mode,
-    intercepted_tool: "edit",
-    intercepted_args: {
-      path: args.path,
-      oldText_len: args.oldText.length,
-      newText_len: args.newText.length,
-    },
+    intercepted_tool: args.intercepted_tool,
+    intercepted_args: args.intercepted_args,
     lanes,
   };
+
+  if (includeToolCalls) {
+    gradingInput.lane_tool_calls = lanes.map((lane) => ({
+      lane_id: lane.lane_id,
+      transcript: laneToolTranscript(lane.session_file),
+    }));
+  }
 
   const gradingInputPath = join(run.dir, "artifacts", "grading-input.json");
   const gradingPromptPath = join(run.dir, "artifacts", "grading-prompt.md");
@@ -225,55 +302,97 @@ export async function runGradingProcess(
   const modelOverride = loaded.experiment.grading?.model ?? loaded.experiment.selection?.grading?.model;
   const model = modelOverride ?? modelToCli(currentModel);
 
-  const argsPi: string[] = ["-p", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"];
+  const argsPiBase: string[] = ["-p", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"];
   if (model) {
-    argsPi.push("--model", model);
+    argsPiBase.push("--model", model);
   }
-  argsPi.push(`@${gradingPromptPath}`, `@${gradingInputPath}`);
 
   const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? loaded.experiment.debug_ui ?? "none").toLowerCase();
 
-  const res = await runGraderPi(argsPi, {
-    cwd,
-    timeoutMs,
-    signal,
-    useCmuxSurface: loaded.experiment.debug === true && debugUiMode !== "none",
-  });
+  let attempt = 1;
+  let lastSchemaError: string | undefined;
 
-  if (res.timedOut) {
-    return {
-      result: null,
-      error: `Grader timed out after ${timeoutMs}ms`,
-      error_code: "grader_timeout",
-    };
+  while (attempt <= 2) {
+    const promptPathForAttempt =
+      attempt === 1
+        ? gradingPromptPath
+        : join(run.dir, "artifacts", `grading-prompt-retry-${attempt}.md`);
+
+    if (attempt > 1) {
+      const retryPrompt = [
+        promptText,
+        "",
+        "Your previous response was invalid JSON/schema.",
+        `Invalid reason: ${lastSchemaError ?? "unknown"}`,
+        "Return ONLY strict JSON matching:",
+        '{"winner_lane_id":"<lane>","scores":[{"lane_id":"A","score":0.0,"reason":"..."}],"confidence":0.0,"tie_break_used":"...","notes":"..."}',
+        "Score must be in [0.0, 1.0].",
+      ].join("\n");
+      writeFileSync(promptPathForAttempt, retryPrompt, "utf8");
+    }
+
+    const argsPi = [...argsPiBase, `@${promptPathForAttempt}`, `@${gradingInputPath}`];
+    const res = await runGraderPi(argsPi, {
+      cwd,
+      timeoutMs,
+      signal,
+      useCmuxSurface: loaded.experiment.debug === true && debugUiMode !== "none",
+    });
+
+    const rawOutPath = join(run.dir, "artifacts", `grading-raw-output-${attempt}.txt`);
+    writeFileSync(rawOutPath, `${res.stdout}\n\n--- STDERR ---\n${res.stderr}`, "utf8");
+
+    if (res.timedOut) {
+      return {
+        result: null,
+        error: `Grader timed out after ${timeoutMs}ms`,
+        error_code: "grader_timeout",
+      };
+    }
+
+    if (res.code !== 0) {
+      return {
+        result: null,
+        error: `Grader process failed (code=${res.code}). stderr: ${res.stderr || "<empty>"}`,
+        error_code: "grader_exit_nonzero",
+      };
+    }
+
+    const parsed = parseGradingOutput(res.stdout);
+    if (!parsed) {
+      lastSchemaError = "Grader output did not contain a JSON object.";
+      if (attempt === 1) {
+        attempt += 1;
+        continue;
+      }
+      return {
+        result: null,
+        error: lastSchemaError,
+        error_code: "grader_output_not_json",
+      };
+    }
+
+    const validated = validateGradingResult(parsed, lanes);
+    if (!validated.ok) {
+      lastSchemaError = `Invalid grader output schema: ${validated.error}`;
+      if (attempt === 1) {
+        attempt += 1;
+        continue;
+      }
+      return {
+        result: null,
+        error: lastSchemaError,
+        error_code: "grader_output_invalid_schema",
+      };
+    }
+
+    writeFileSync(gradingOutputPath, JSON.stringify(validated.result, null, 2), "utf8");
+    return { result: validated.result };
   }
 
-  if (res.code !== 0) {
-    return {
-      result: null,
-      error: `Grader process failed (code=${res.code}). stderr: ${res.stderr || "<empty>"}`,
-      error_code: "grader_exit_nonzero",
-    };
-  }
-
-  const parsed = parseGradingOutput(res.stdout);
-  if (!parsed) {
-    return {
-      result: null,
-      error: "Grader output did not contain a JSON object.",
-      error_code: "grader_output_not_json",
-    };
-  }
-
-  const validated = validateGradingResult(parsed, lanes);
-  if (!validated.ok) {
-    return {
-      result: null,
-      error: `Invalid grader output schema: ${validated.error}`,
-      error_code: "grader_output_invalid_schema",
-    };
-  }
-
-  writeFileSync(gradingOutputPath, JSON.stringify(validated.result, null, 2), "utf8");
-  return { result: validated.result };
+  return {
+    result: null,
+    error: "Unknown grading failure",
+    error_code: "grader_output_invalid_schema",
+  };
 }

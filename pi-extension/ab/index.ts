@@ -1,16 +1,37 @@
-import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { join, basename } from "node:path";
-import { homedir } from "node:os";
+import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { createEditTool } from "@mariozechner/pi-coding-agent";
+import {
+  createBashTool,
+  createEditTool,
+  createFindTool,
+  createGrepTool,
+  createLsTool,
+  createReadTool,
+  createWriteTool,
+} from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { chooseDeterministicLane, getPrimaryLaneId } from "./selection.ts";
-import { formatExperimentSummary, loadExperiments, selectExperimentForEdit } from "./config.ts";
+import { getPrimaryLaneId } from "./selection.ts";
+import {
+  canonicalExecutionStrategy,
+  formatExperimentSummary,
+  loadExperiments,
+  selectExperimentForEdit,
+  selectExperimentForTool,
+} from "./config.ts";
 import { createRunContext, writeLaneRecords, writeRunManifest } from "./storage.ts";
 import { runAbWizard } from "./wizard.ts";
-import { applyPatchToMain, runExperimentLanes } from "./runner.ts";
-import { runGradingProcess } from "./grading.ts";
-import type { LaneRunRecord, LoadedExperiment, WinnerSelection } from "./types.ts";
+import {
+  applyPatchToMain,
+  runExperimentLanes,
+  runExperimentLanesFixedArgsTool,
+  runExperimentLanesMultiCall,
+  runExperimentLanesSingleCall,
+  type CapabilityFairnessTelemetry,
+  type LaneProgressSnapshot,
+} from "./runner.ts";
+import { runAbGcCommand } from "./gc.ts";
+import { defaultPolicy, laneById, selectWinner } from "./winner.ts";
+import type { LaneRunRecord } from "./types.ts";
 
 const EditParams = Type.Object({
   path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
@@ -18,201 +39,486 @@ const EditParams = Type.Object({
   newText: Type.String({ description: "New text to replace the old text with" }),
 });
 
-function defaultPolicy(experiment: LoadedExperiment["experiment"]) {
-  const fp = experiment.failure_policy ?? {};
+const ReplanFlowParams = Type.Object({
+  task: Type.String({ description: "Goal for this flow. Lanes may have different concrete APIs and will replan." }),
+  context: Type.Optional(Type.String({ description: "Optional context for the flow" })),
+  constraints: Type.Optional(Type.String({ description: "Optional constraints/instructions" })),
+});
+
+function summarizeLaneFailures(records: LaneRunRecord[]) {
+  const failures = records
+    .filter((r) => r.status !== "success")
+    .map((r) => ({
+      lane_id: r.lane_id,
+      status: r.status,
+      error: r.error,
+      process_exit_code: r.process_exit_code,
+      lane_harness_used: r.lane_harness_used,
+    }));
+
   return {
-    on_grading_failure: fp.on_grading_failure ?? "fallback_deterministic_then_shadow",
-    on_winner_apply_failure: fp.on_winner_apply_failure ?? "fallback_primary_then_fail",
-    all_lanes_failed: fp.all_lanes_failed ?? "fail_tool_call",
+    lane_failures_count: failures.length,
+    lane_failures: failures,
   };
 }
 
-function successfulLanes(records: LaneRunRecord[]): LaneRunRecord[] {
-  return records.filter((r) => r.status === "success" && !!r.patch_path && (r.patch_bytes ?? 0) > 0);
+function formatLaneStatus(experimentId: string, snapshot: LaneProgressSnapshot): string {
+  const lanes = snapshot.lanes
+    .map((lane) => {
+      const icon =
+        lane.status === "pending"
+          ? "○"
+          : lane.status === "running"
+            ? "⏳"
+            : lane.status === "success"
+              ? "✅"
+              : lane.status === "timeout"
+                ? "⏱"
+                : "❌";
+      const secs = lane.elapsed_ms != null ? ` ${Math.max(0, lane.elapsed_ms / 1000).toFixed(1)}s` : "";
+      return `${lane.lane_id}${icon}${secs}`;
+    })
+    .join("  ");
+
+  return `AB ${experimentId}: ${lanes}`;
 }
 
-async function selectWinner(
-  loaded: LoadedExperiment,
-  run: { runId: string; dir: string },
-  cwd: string,
-  records: LaneRunRecord[],
-  editArgs: { path: string; oldText: string; newText: string },
-  model: { provider?: string; id?: string } | undefined,
-  signal?: AbortSignal,
-): Promise<WinnerSelection> {
+type NativeToolDelegate = {
+  description?: string;
+  parameters?: any;
+  execute: (
+    toolCallId: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+    onUpdate?: any,
+  ) => Promise<any>;
+};
+
+function createNativeToolDelegate(toolName: string, cwd: string): NativeToolDelegate | undefined {
+  if (toolName === "read") return createReadTool(cwd) as unknown as NativeToolDelegate;
+  if (toolName === "bash") return createBashTool(cwd) as unknown as NativeToolDelegate;
+  if (toolName === "edit") return createEditTool(cwd) as unknown as NativeToolDelegate;
+  if (toolName === "write") return createWriteTool(cwd) as unknown as NativeToolDelegate;
+  if (toolName === "grep") return createGrepTool(cwd) as unknown as NativeToolDelegate;
+  if (toolName === "find") return createFindTool(cwd) as unknown as NativeToolDelegate;
+  if (toolName === "ls") return createLsTool(cwd) as unknown as NativeToolDelegate;
+  return undefined;
+}
+
+function fairnessManifestFields(fairness: CapabilityFairnessTelemetry): Record<string, unknown> {
+  return {
+    capability_policy: fairness.capability_policy,
+    capability_intersection_keys: fairness.capability_intersection_keys,
+    capability_union_keys: fairness.capability_union_keys,
+    lane_capabilities: fairness.lane_capabilities,
+  };
+}
+
+async function runFixedArgsToolExperiment(
+  params: Record<string, unknown>,
+  toolName: string,
+  toolCallId: string,
+  signal: AbortSignal | undefined,
+  onUpdate: any,
+  ctx: any,
+  cooldownState: Map<string, number>,
+  nativeTool?: NativeToolDelegate,
+) {
+  const now = Date.now();
+  const matched = selectExperimentForTool(ctx.cwd, toolName, params, now, cooldownState, {
+    executionStrategy: "fixed_args",
+  });
+
+  let loaded = matched;
+  let triggerBypassed = false;
+
+  if (!loaded) {
+    if (nativeTool) {
+      return nativeTool.execute(toolCallId, params, signal, onUpdate);
+    }
+
+    loaded = loadExperiments(ctx.cwd)
+      .filter((e) => e.experiment.enabled !== false)
+      .filter((e) => (e.validation?.errors?.length ?? 0) === 0)
+      .filter((e) => e.experiment.target_tool === toolName)
+      .find((e) => canonicalExecutionStrategy(e.experiment.execution_strategy) === "fixed_args") ?? null;
+
+    if (!loaded) {
+      throw new Error(
+        `No fixed_args experiment configured for tool '${toolName}', and no native delegate is available.`,
+      );
+    }
+
+    triggerBypassed = true;
+  }
+
   const experiment = loaded.experiment;
-  const policy = defaultPolicy(experiment);
-  const primaryLaneId = getPrimaryLaneId(experiment);
-  const success = successfulLanes(records);
+  cooldownState.set(experiment.id, now);
 
-  if (success.length === 0) {
-    if (policy.all_lanes_failed === "fallback_primary") {
-      return {
-        winner_lane_id: primaryLaneId,
-        mode_used: "shadow",
-        reason: "all lanes failed; fallback_primary policy",
-        selection_source: "fallback_shadow_primary",
-        fallback_reason_code: "all_lanes_failed",
-      };
-    }
-    throw new Error("All experiment lanes failed.");
-  }
+  const run = createRunContext(ctx.cwd);
+  writeRunManifest(run, experiment, {
+    source: loaded.source,
+    config_path: loaded.path,
+    mode: experiment.mode,
+    intercepted_tool: toolName,
+    intercepted_args: params,
+    execution_strategy: canonicalExecutionStrategy(experiment.execution_strategy),
+    lane_harness: process.env.PI_AB_LANE_HARNESS ?? experiment.lane_harness ?? "direct",
+    trigger_bypassed: triggerBypassed || undefined,
+    trigger_bypass_reason: triggerBypassed ? "no_native_delegate_for_nonmatching_trigger" : undefined,
+    stage: "started",
+  });
 
-  if (experiment.mode === "shadow") {
-    const hasPrimary = success.some((r) => r.lane_id === primaryLaneId);
-    return {
-      winner_lane_id: hasPrimary ? primaryLaneId : success[0].lane_id,
-      mode_used: "shadow",
-      reason: hasPrimary ? "shadow primary lane" : "shadow primary failed, first successful lane fallback",
-      selection_source: hasPrimary ? "shadow_primary" : "shadow_first_success_fallback",
-      fallback_reason_code: hasPrimary ? undefined : "shadow_primary_not_successful",
-    };
-  }
-
-  if (experiment.mode === "deterministic") {
-    const picked = chooseDeterministicLane(experiment, records);
-    if (!picked.laneId) throw new Error("Deterministic selection found no winner.");
-    return {
-      winner_lane_id: picked.laneId,
-      mode_used: "deterministic",
-      reason: picked.reason,
-      selection_source: "deterministic",
-    };
-  }
-
-  // grading mode
-  const grade = await runGradingProcess(loaded, run, cwd, records, editArgs, model, signal);
-  const gradeWinner = grade.result?.winner_lane_id;
-  const gradeWinnerUsable = gradeWinner ? success.some((r) => r.lane_id === gradeWinner) : false;
-
-  if (grade.result && gradeWinner && gradeWinnerUsable) {
-    return {
-      winner_lane_id: gradeWinner,
-      mode_used: "grading",
-      reason: "grading process winner",
-      selection_source: "grading",
-    };
-  }
-
-  const gradingFailureCode = grade.error_code ?? (gradeWinner ? "grading_winner_not_successful" : "grading_no_result");
-
-  if (policy.on_grading_failure === "fallback_deterministic_then_shadow") {
-    const picked = chooseDeterministicLane(experiment, records);
-    if (picked.laneId) {
-      return {
-        winner_lane_id: picked.laneId,
-        mode_used: "grading-fallback-deterministic",
-        reason: `grading fallback: ${picked.reason}`,
-        selection_source: "grading_fallback_deterministic",
-        fallback_reason_code: gradingFailureCode,
-        grading_error: grade.error,
-        grading_error_code: grade.error_code,
-      };
-    }
-  }
-
-  return {
-    winner_lane_id: primaryLaneId,
-    mode_used: "grading-fallback-shadow",
-    reason: "grading failed; fallback shadow primary",
-    selection_source: "grading_fallback_shadow",
-    fallback_reason_code: gradingFailureCode,
-    grading_error: grade.error,
-    grading_error_code: grade.error_code,
-  };
-}
-
-function laneById(records: LaneRunRecord[], id: string): LaneRunRecord | undefined {
-  return records.find((r) => r.lane_id === id);
-}
-
-interface AbGcOptions {
-  keepLast: number;
-  olderThanMs?: number;
-  force: boolean;
-  project?: string;
-  allProjects: boolean;
-}
-
-function parseDurationToMs(value: string): number | null {
-  const m = value.trim().match(/^(\d+)([smhd])$/i);
-  if (!m) return null;
-  const amount = parseInt(m[1], 10);
-  const unit = m[2].toLowerCase();
-  const factor = unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
-  return amount * factor;
-}
-
-function parseGcOptions(args: string): { options?: AbGcOptions; error?: string; help?: boolean } {
-  const tokens = args.split(/\s+/).filter(Boolean);
-  const options: AbGcOptions = { keepLast: 10, force: false, allProjects: false };
-
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
-    if (token === "--help" || token === "-h") return { help: true };
-    if (token === "--force") {
-      options.force = true;
-      continue;
-    }
-    if (token === "--all-projects") {
-      options.allProjects = true;
-      continue;
-    }
-    if (token === "--project") {
-      const value = tokens[++i];
-      if (!value) return { error: "Missing value for --project" };
-      options.project = value;
-      continue;
-    }
-    if (token === "--keep-last") {
-      const value = tokens[++i];
-      const n = value ? parseInt(value, 10) : NaN;
-      if (!Number.isFinite(n) || n < 0) return { error: "--keep-last expects a non-negative integer" };
-      options.keepLast = n;
-      continue;
-    }
-    if (token === "--older-than") {
-      const value = tokens[++i];
-      if (!value) return { error: "Missing value for --older-than" };
-      const ms = parseDurationToMs(value);
-      if (ms == null) return { error: "--older-than expects <number><s|m|h|d>, e.g. 7d" };
-      options.olderThanMs = ms;
-      continue;
-    }
-    return { error: `Unknown gc option: ${token}` };
-  }
-
-  if (options.project && options.allProjects) {
-    return { error: "Use either --project <name> or --all-projects, not both." };
-  }
-
-  return { options };
-}
-
-function parseRunTimestampMs(runDir: string, runId: string): number {
-  const runJsonPath = join(runDir, "run.json");
-  try {
-    const parsed = JSON.parse(readFileSync(runJsonPath, "utf8"));
-    const ts = Date.parse(parsed?.timestamp);
-    if (Number.isFinite(ts)) return ts;
-  } catch {}
-
-  const idMatch = runId.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z/);
-  if (idMatch) {
-    const iso = `${idMatch[1]}T${idMatch[2]}:${idMatch[3]}:${idMatch[4]}.${idMatch[5]}Z`;
-    const fromId = Date.parse(iso);
-    if (Number.isFinite(fromId)) return fromId;
-  }
+  const laneStatusKey = "ab-lanes";
 
   try {
-    return statSync(runDir).mtimeMs;
-  } catch {
-    return 0;
+    const laneRun = await runExperimentLanesFixedArgsTool(
+      loaded,
+      run,
+      ctx.cwd,
+      toolName,
+      params,
+      signal,
+      (snapshot) => {
+        ctx.ui.setStatus(laneStatusKey, formatLaneStatus(experiment.id, snapshot));
+      },
+    );
+
+    const lanes = laneRun.records;
+    writeLaneRecords(run, lanes);
+    writeRunManifest(run, experiment, {
+      ...fairnessManifestFields(laneRun.fairness),
+      ...summarizeLaneFailures(lanes),
+    });
+
+    const winner = await selectWinner(loaded, run, ctx.cwd, lanes, { intercepted_tool: toolName, intercepted_args: params as Record<string, unknown> }, ctx.model, signal);
+    const selected = laneById(lanes, winner.winner_lane_id);
+    if (!selected) {
+      throw new Error(`Winner lane ${winner.winner_lane_id} not found.`);
+    }
+    if (selected.status !== "success") {
+      throw new Error(`Winner lane ${winner.winner_lane_id} is not successful (${selected.status}).`);
+    }
+
+    writeRunManifest(run, experiment, {
+      stage: "completed",
+      winner_lane_id: selected.lane_id,
+      winner_mode: winner.mode_used,
+      reason: winner.reason,
+      selection_source: winner.selection_source,
+      fallback_reason_code: winner.fallback_reason_code,
+      grading_error_code: winner.grading_error_code,
+    });
+
+    return {
+      content: [{ type: "text", text: selected.output_text ?? "Done." }],
+      details: {
+        ab: {
+          run_id: run.runId,
+          experiment_id: experiment.id,
+          winner_lane_id: selected.lane_id,
+          mode: winner.mode_used,
+          selection_source: winner.selection_source,
+          fallback_reason_code: winner.fallback_reason_code,
+          grading_error: winner.grading_error,
+          grading_error_code: winner.grading_error_code,
+          capability_policy: laneRun.fairness.capability_policy,
+        },
+      },
+    };
+  } catch (err: any) {
+    const errorText = err?.message ?? String(err);
+    writeRunManifest(run, experiment, {
+      stage: "failed",
+      error: errorText,
+      fallback_reason_code: "ab_failed_no_fallback",
+    });
+    throw err;
+  } finally {
+    ctx.ui.setStatus(laneStatusKey, undefined);
+  }
+}
+
+async function runSingleCallFlowExperiment(
+  params: { task: string; context?: string; constraints?: string },
+  toolName: string,
+  signal: AbortSignal | undefined,
+  ctx: any,
+  cooldownState: Map<string, number>,
+) {
+  const now = Date.now();
+  const loaded = selectExperimentForTool(ctx.cwd, toolName, params as Record<string, unknown>, now, cooldownState, {
+    executionStrategy: "lane_single_call",
+  });
+  if (!loaded) {
+    throw new Error(
+      `No active lane_single_call experiment matched tool '${toolName}'. Configure target_tool='${toolName}', trigger.tool='${toolName}', execution_strategy='lane_single_call'.`,
+    );
+  }
+
+  const experiment = loaded.experiment;
+  cooldownState.set(experiment.id, now);
+
+  const run = createRunContext(ctx.cwd);
+  writeRunManifest(run, experiment, {
+    source: loaded.source,
+    config_path: loaded.path,
+    mode: experiment.mode,
+    intercepted_tool: toolName,
+    intercepted_args: {
+      task_len: params.task.length,
+      context_len: (params.context ?? "").length,
+      constraints_len: (params.constraints ?? "").length,
+    },
+    execution_strategy: canonicalExecutionStrategy(experiment.execution_strategy),
+    lane_harness: "pi_prompt",
+    stage: "started",
+  });
+
+  const laneStatusKey = "ab-lanes";
+
+  try {
+    const laneRun = await runExperimentLanesSingleCall(
+      loaded,
+      run,
+      ctx.cwd,
+      toolName,
+      params,
+      signal,
+      (snapshot) => {
+        ctx.ui.setStatus(laneStatusKey, formatLaneStatus(experiment.id, snapshot));
+      },
+    );
+
+    const lanes = laneRun.records;
+    writeLaneRecords(run, lanes);
+    writeRunManifest(run, experiment, {
+      ...fairnessManifestFields(laneRun.fairness),
+      ...summarizeLaneFailures(lanes),
+    });
+
+    const winner = await selectWinner(loaded, run, ctx.cwd, lanes, { intercepted_tool: toolName, intercepted_args: params as Record<string, unknown> }, ctx.model, signal);
+    const selected = laneById(lanes, winner.winner_lane_id);
+    if (!selected) {
+      throw new Error(`Winner lane ${winner.winner_lane_id} not found.`);
+    }
+    if (selected.status !== "success") {
+      throw new Error(`Winner lane ${winner.winner_lane_id} is not successful (${selected.status}).`);
+    }
+
+    writeRunManifest(run, experiment, {
+      stage: "completed",
+      winner_lane_id: selected.lane_id,
+      winner_mode: winner.mode_used,
+      reason: winner.reason,
+      selection_source: winner.selection_source,
+      fallback_reason_code: winner.fallback_reason_code,
+      grading_error_code: winner.grading_error_code,
+    });
+
+    return {
+      content: [{ type: "text", text: selected.output_text ?? "Flow completed." }],
+      details: {
+        ab: {
+          run_id: run.runId,
+          experiment_id: experiment.id,
+          winner_lane_id: selected.lane_id,
+          mode: winner.mode_used,
+          selection_source: winner.selection_source,
+          fallback_reason_code: winner.fallback_reason_code,
+          grading_error: winner.grading_error,
+          grading_error_code: winner.grading_error_code,
+          capability_policy: laneRun.fairness.capability_policy,
+        },
+      },
+    };
+  } catch (err: any) {
+    const errorText = err?.message ?? String(err);
+    writeRunManifest(run, experiment, {
+      stage: "failed",
+      error: errorText,
+      fallback_reason_code: "ab_failed_no_fallback",
+    });
+    throw err;
+  } finally {
+    ctx.ui.setStatus(laneStatusKey, undefined);
+  }
+}
+
+async function runMultiCallFlowExperiment(
+  params: { task: string; context?: string; constraints?: string },
+  toolName: string,
+  signal: AbortSignal | undefined,
+  ctx: any,
+  cooldownState: Map<string, number>,
+) {
+  const now = Date.now();
+  const loaded = selectExperimentForTool(ctx.cwd, toolName, params as Record<string, unknown>, now, cooldownState, {
+    executionStrategy: "lane_multi_call",
+  });
+  if (!loaded) {
+    throw new Error(
+      `No active lane_multi_call experiment matched tool '${toolName}'. Configure target_tool='${toolName}', trigger.tool='${toolName}', execution_strategy='lane_multi_call'.`,
+    );
+  }
+
+  const experiment = loaded.experiment;
+  cooldownState.set(experiment.id, now);
+
+  const run = createRunContext(ctx.cwd);
+  writeRunManifest(run, experiment, {
+    source: loaded.source,
+    config_path: loaded.path,
+    mode: experiment.mode,
+    intercepted_tool: toolName,
+    intercepted_args: {
+      task_len: params.task.length,
+      context_len: (params.context ?? "").length,
+      constraints_len: (params.constraints ?? "").length,
+    },
+    execution_strategy: canonicalExecutionStrategy(experiment.execution_strategy),
+    lane_harness: "pi_prompt",
+    stage: "started",
+  });
+
+  const laneStatusKey = "ab-lanes";
+
+  try {
+    const lanes = await runExperimentLanesMultiCall(
+      loaded,
+      run,
+      ctx.cwd,
+      toolName,
+      params,
+      signal,
+      (snapshot) => {
+        ctx.ui.setStatus(laneStatusKey, formatLaneStatus(experiment.id, snapshot));
+      },
+    );
+
+    writeLaneRecords(run, lanes);
+    writeRunManifest(run, experiment, {
+      ...summarizeLaneFailures(lanes),
+    });
+
+    const winner = await selectWinner(loaded, run, ctx.cwd, lanes, { intercepted_tool: toolName, intercepted_args: params as Record<string, unknown> }, ctx.model, signal);
+    const selected = laneById(lanes, winner.winner_lane_id);
+    if (!selected) {
+      throw new Error(`Winner lane ${winner.winner_lane_id} not found.`);
+    }
+    if (selected.status !== "success") {
+      throw new Error(`Winner lane ${winner.winner_lane_id} is not successful (${selected.status}).`);
+    }
+
+    writeRunManifest(run, experiment, {
+      stage: "completed",
+      winner_lane_id: selected.lane_id,
+      winner_mode: winner.mode_used,
+      reason: winner.reason,
+      selection_source: winner.selection_source,
+      fallback_reason_code: winner.fallback_reason_code,
+      grading_error_code: winner.grading_error_code,
+    });
+
+    return {
+      content: [{ type: "text", text: selected.output_text ?? "Flow completed." }],
+      details: {
+        ab: {
+          run_id: run.runId,
+          experiment_id: experiment.id,
+          winner_lane_id: selected.lane_id,
+          mode: winner.mode_used,
+          selection_source: winner.selection_source,
+          fallback_reason_code: winner.fallback_reason_code,
+          grading_error: winner.grading_error,
+          grading_error_code: winner.grading_error_code,
+        },
+      },
+    };
+  } catch (err: any) {
+    const errorText = err?.message ?? String(err);
+    writeRunManifest(run, experiment, {
+      stage: "failed",
+      error: errorText,
+      fallback_reason_code: "ab_failed_no_fallback",
+    });
+    throw err;
+  } finally {
+    ctx.ui.setStatus(laneStatusKey, undefined);
   }
 }
 
 export default function abConductorExtension(pi: ExtensionAPI) {
   const cooldownState = new Map<string, number>();
+
+  pi.on("session_start", (_event, ctx) => {
+    const seenFixedArgsTools = new Set<string>();
+    const allExperiments = loadExperiments(ctx.cwd)
+      .filter((e) => e.experiment.enabled !== false)
+      .filter((e) => (e.validation?.errors?.length ?? 0) === 0)
+      .filter((e) => e.experiment.target_tool !== "edit");
+
+    const fixedArgsExperiments = allExperiments.filter(
+      (e) => canonicalExecutionStrategy(e.experiment.execution_strategy) === "fixed_args",
+    );
+
+    for (const loaded of fixedArgsExperiments) {
+      const toolName = loaded.experiment.target_tool;
+      if (!toolName || seenFixedArgsTools.has(toolName)) continue;
+      seenFixedArgsTools.add(toolName);
+
+      const existing = pi.getAllTools().find((t) => t.name === toolName);
+
+      pi.registerTool({
+        name: toolName,
+        label: existing?.name ?? toolName,
+        description:
+          existing?.description ??
+          `AB fixed-args interceptor for '${toolName}'. Runs experiment lanes with identical tool args and returns the winning lane result.`,
+        parameters: existing?.parameters ?? Type.Object({}, { additionalProperties: true }),
+        async execute(toolCallId, params, signal, onUpdate, execCtx) {
+          const nativeTool = createNativeToolDelegate(toolName, execCtx.cwd);
+          return runFixedArgsToolExperiment(params as Record<string, unknown>, toolName, toolCallId, signal, onUpdate, execCtx, cooldownState, nativeTool);
+        },
+      });
+
+      ctx.ui.notify(`Registered fixed_args A/B interceptor: ${toolName}`, "info");
+    }
+
+    const seenProxyTools = new Set<string>();
+    const proxyExperiments = allExperiments.filter((e) => {
+      const strategy = canonicalExecutionStrategy(e.experiment.execution_strategy);
+      return strategy === "lane_single_call" || strategy === "lane_multi_call";
+    });
+
+    for (const loaded of proxyExperiments) {
+      const toolName = loaded.experiment.target_tool;
+      if (!toolName || seenProxyTools.has(toolName) || seenFixedArgsTools.has(toolName)) continue;
+      seenProxyTools.add(toolName);
+
+      pi.registerTool({
+        name: toolName,
+        label: toolName,
+        description:
+          `AB proxy-flow starter for '${toolName}'. Call this with task/context/constraints; lanes run either lane_single_call (single tool call) or lane_multi_call (multi-step replanning).`,
+        parameters: ReplanFlowParams,
+        async execute(_toolCallId, params, signal, _onUpdate, execCtx) {
+          try {
+            return await runSingleCallFlowExperiment(params, toolName, signal, execCtx, cooldownState);
+          } catch (err: any) {
+            const msg = err?.message ?? String(err);
+            if (!msg.includes("No active lane_single_call experiment matched tool")) {
+              throw err;
+            }
+          }
+
+          return runMultiCallFlowExperiment(params, toolName, signal, execCtx, cooldownState);
+        },
+      });
+
+      ctx.ui.notify(`Registered proxy A/B tool: ${toolName}`, "info");
+    }
+  });
 
   pi.registerCommand("ab", {
     description: "A/B conductor controls: /ab wizard | status | validate | gc",
@@ -230,108 +536,32 @@ export default function abConductorExtension(pi: ExtensionAPI) {
           ctx.ui.notify("No A/B experiments found (global or project).", "warning");
           return;
         }
-        const lines = experiments.map((e) => `• ${formatExperimentSummary(e)}`);
-        ctx.ui.notify(lines.join("\n"), "info");
+
+        if (cmd === "status") {
+          const lines = experiments.map((e) => `• ${formatExperimentSummary(e)}`);
+          ctx.ui.notify(lines.join("\n"), "info");
+          return;
+        }
+
+        const lines: string[] = [];
+        for (const e of experiments) {
+          lines.push(`• ${formatExperimentSummary(e)}`);
+          for (const err of e.validation?.errors ?? []) {
+            lines.push(`  - ERROR: ${err}`);
+          }
+          for (const warn of e.validation?.warnings ?? []) {
+            lines.push(`  - WARN: ${warn}`);
+          }
+        }
+
+        const hasErrors = experiments.some((e) => (e.validation?.errors?.length ?? 0) > 0);
+        ctx.ui.notify(lines.join("\n"), hasErrors ? "warning" : "info");
         return;
       }
 
       if (cmd === "gc" || cmd.startsWith("gc ")) {
-        const parsed = parseGcOptions(cmd.slice(2).trim());
-        if (parsed.help) {
-          ctx.ui.notify(
-            [
-              "Usage: /ab gc [--keep-last N] [--older-than 7d] [--project NAME | --all-projects] [--force]",
-              "Default is dry-run (no deletion). Add --force to delete.",
-            ].join("\n"),
-            "info",
-          );
-          return;
-        }
-        if (parsed.error || !parsed.options) {
-          ctx.ui.notify(`GC option error: ${parsed.error ?? "invalid options"}`, "warning");
-          return;
-        }
-
-        const options = parsed.options;
-        const runsRoot = join(homedir(), ".pi", "agent", "ab", "runs");
-        const defaultProject = basename(ctx.cwd);
-        const projectNames = options.allProjects
-          ? (() => {
-              try {
-                return readdirSync(runsRoot, { withFileTypes: true })
-                  .filter((d) => d.isDirectory())
-                  .map((d) => d.name)
-                  .sort();
-              } catch {
-                return [] as string[];
-              }
-            })()
-          : [options.project ?? defaultProject];
-
-        const now = Date.now();
-        const deletions: Array<{ project: string; runId: string; path: string; ageMs: number }> = [];
-        let scannedRuns = 0;
-
-        for (const projectName of projectNames) {
-          const projectDir = join(runsRoot, projectName);
-          let runEntries: Array<{ runId: string; path: string; ts: number }> = [];
-          try {
-            runEntries = readdirSync(projectDir, { withFileTypes: true })
-              .filter((d) => d.isDirectory())
-              .map((d) => {
-                const runId = d.name;
-                const path = join(projectDir, runId);
-                return { runId, path, ts: parseRunTimestampMs(path, runId) };
-              })
-              .sort((a, b) => b.ts - a.ts);
-          } catch {
-            continue;
-          }
-
-          scannedRuns += runEntries.length;
-          const protectedSet = new Set(runEntries.slice(0, options.keepLast).map((r) => r.runId));
-
-          for (const run of runEntries) {
-            if (protectedSet.has(run.runId)) continue;
-            const ageMs = Math.max(0, now - run.ts);
-            if (options.olderThanMs != null && ageMs < options.olderThanMs) continue;
-            deletions.push({ project: projectName, runId: run.runId, path: run.path, ageMs });
-          }
-        }
-
-        if (deletions.length === 0) {
-          ctx.ui.notify(`AB GC: nothing to delete (scanned ${scannedRuns} runs).`, "info");
-          return;
-        }
-
-        if (!options.force) {
-          const sample = deletions
-            .slice(0, 8)
-            .map((d) => `• ${d.project}/${d.runId}`)
-            .join("\n");
-          ctx.ui.notify(
-            [
-              `AB GC dry-run: would delete ${deletions.length} runs (scanned ${scannedRuns}).`,
-              sample,
-              deletions.length > 8 ? `…and ${deletions.length - 8} more` : "",
-              "Re-run with --force to delete.",
-            ]
-              .filter(Boolean)
-              .join("\n"),
-            "warning",
-          );
-          return;
-        }
-
-        let deleted = 0;
-        for (const d of deletions) {
-          try {
-            rmSync(d.path, { recursive: true, force: true });
-            deleted += 1;
-          } catch {}
-        }
-
-        ctx.ui.notify(`AB GC deleted ${deleted}/${deletions.length} runs (scanned ${scannedRuns}).`, "info");
+        const result = runAbGcCommand(cmd.slice(2).trim(), ctx.cwd);
+        ctx.ui.notify(result.message, result.level === "error" ? "error" : result.level === "warning" ? "warning" : "info");
         return;
       }
 
@@ -386,11 +616,13 @@ export default function abConductorExtension(pi: ExtensionAPI) {
         mode: experiment.mode,
         intercepted_tool: "edit",
         intercepted_args: { path: params.path, oldText_len: params.oldText.length, newText_len: params.newText.length },
+        execution_strategy: canonicalExecutionStrategy(experiment.execution_strategy),
         lane_harness: process.env.PI_AB_LANE_HARNESS ?? experiment.lane_harness ?? "direct",
         stage: "started",
       });
 
       const policy = defaultPolicy(experiment);
+      const laneStatusKey = "ab-lanes";
 
       try {
         const lanes = await runExperimentLanes(
@@ -400,15 +632,29 @@ export default function abConductorExtension(pi: ExtensionAPI) {
           ctx.sessionManager.getSessionFile(),
           { path: params.path, oldText: params.oldText, newText: params.newText },
           signal,
+          (snapshot) => {
+            ctx.ui.setStatus(laneStatusKey, formatLaneStatus(experiment.id, snapshot));
+          },
         );
+
         writeLaneRecords(run, lanes);
+        writeRunManifest(run, experiment, {
+          ...summarizeLaneFailures(lanes),
+        });
 
         const winner = await selectWinner(
           loaded,
           run,
           ctx.cwd,
           lanes,
-          { path: params.path, oldText: params.oldText, newText: params.newText },
+          {
+            intercepted_tool: "edit",
+            intercepted_args: {
+              path: params.path,
+              oldText_len: params.oldText.length,
+              newText_len: params.newText.length,
+            },
+          },
           ctx.model,
           signal,
         );
@@ -533,6 +779,8 @@ export default function abConductorExtension(pi: ExtensionAPI) {
           fallback_reason_code: "ab_failed_no_fallback",
         });
         throw err;
+      } finally {
+        ctx.ui.setStatus(laneStatusKey, undefined);
       }
     },
   });

@@ -1,4 +1,5 @@
-export type AbMode = "shadow" | "deterministic" | "grading";
+export type AbMode = "shadow" | "deterministic" | "grading" | "hybrid";
+export type ExecutionStrategy = "fixed_args" | "lane_single_call" | "lane_multi_call";
 
 export interface TriggerPolicy {
   tool: string;
@@ -36,7 +37,16 @@ export interface GradingConfig {
     outputs?: boolean;
     metrics?: boolean;
     patches?: boolean;
+    tool_calls?: boolean;
   };
+}
+
+export interface HybridSelection {
+  mode?: "llm_tiebreaker" | "llm_score";
+  deterministic_weight?: number;
+  llm_weight?: number;
+  final_objective?: string;
+  final_tie_breakers?: string[];
 }
 
 export interface AbExperiment {
@@ -45,6 +55,7 @@ export interface AbExperiment {
   target_tool: string;
   trigger: TriggerPolicy;
   mode: AbMode;
+  execution_strategy?: ExecutionStrategy;
   lanes: LaneConfig[];
   timeout_ms?: number;
   debug?: boolean;
@@ -53,6 +64,7 @@ export interface AbExperiment {
   selection?: {
     deterministic?: DeterministicSelection;
     grading?: GradingConfig;
+    hybrid?: HybridSelection;
   };
   grading?: GradingConfig;
   failure_policy?: FailurePolicy;
@@ -62,6 +74,10 @@ export interface LoadedExperiment {
   source: "global" | "project";
   path: string;
   experiment: AbExperiment;
+  validation?: {
+    errors: string[];
+    warnings: string[];
+  };
 }
 
 export type LaneStatus = "not_run_mvp" | "success" | "error" | "timeout";

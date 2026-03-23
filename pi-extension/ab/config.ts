@@ -53,7 +53,12 @@ export function loadExperiments(cwd: string): LoadedExperiment[] {
     try {
       for (const experiment of readExperimentFile(path)) {
         if (!experiment?.id) continue;
-        merged.set(experiment.id, { source: "global", path, experiment });
+        merged.set(experiment.id, {
+          source: "global",
+          path,
+          experiment,
+          validation: validateExperimentConfig(experiment),
+        });
       }
     } catch {
       // skip malformed/unavailable config file and continue loading others
@@ -65,7 +70,12 @@ export function loadExperiments(cwd: string): LoadedExperiment[] {
       for (const experiment of readExperimentFile(path)) {
         if (!experiment?.id) continue;
         // project scope overrides global by id
-        merged.set(experiment.id, { source: "project", path, experiment });
+        merged.set(experiment.id, {
+          source: "project",
+          path,
+          experiment,
+          validation: validateExperimentConfig(experiment),
+        });
       }
     } catch {
       // skip malformed/unavailable config file and continue loading others
@@ -75,6 +85,67 @@ export function loadExperiments(cwd: string): LoadedExperiment[] {
   return [...merged.values()];
 }
 
+export function canonicalExecutionStrategy(
+  strategy: unknown,
+): "fixed_args" | "lane_single_call" | "lane_multi_call" | "invalid" {
+  if (strategy == null) return "fixed_args";
+  if (strategy === "fixed_args") return "fixed_args";
+  if (strategy === "lane_single_call") return "lane_single_call";
+  if (strategy === "lane_multi_call") return "lane_multi_call";
+  return "invalid";
+}
+
+export function validateExperimentConfig(experiment: AbExperiment): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  const strategy = canonicalExecutionStrategy(experiment.execution_strategy);
+  if (strategy === "invalid") {
+    errors.push(`Unsupported execution_strategy '${String(experiment.execution_strategy)}'.`);
+  }
+
+  if (!experiment.target_tool || !experiment.target_tool.trim()) {
+    errors.push("target_tool is required.");
+  }
+
+  if (!experiment.trigger?.tool || !experiment.trigger.tool.trim()) {
+    errors.push("trigger.tool is required.");
+  }
+
+  if (experiment.trigger?.tool && experiment.target_tool && experiment.trigger.tool !== experiment.target_tool) {
+    warnings.push("trigger.tool differs from target_tool; experiment may never match.");
+  }
+
+  if (!Array.isArray(experiment.lanes) || experiment.lanes.length === 0) {
+    errors.push("At least one lane is required.");
+  }
+
+  const mode = experiment.mode;
+  if (mode === "hybrid") {
+    const hm = experiment.selection?.hybrid?.mode ?? "llm_tiebreaker";
+    if (hm !== "llm_tiebreaker" && hm !== "llm_score") {
+      errors.push(`Unsupported hybrid.mode '${String(hm)}'.`);
+    }
+
+    if (hm === "llm_score") {
+      const dw = experiment.selection?.hybrid?.deterministic_weight;
+      const lw = experiment.selection?.hybrid?.llm_weight;
+      if (dw != null && !Number.isFinite(dw)) errors.push("selection.hybrid.deterministic_weight must be a finite number.");
+      if (lw != null && !Number.isFinite(lw)) errors.push("selection.hybrid.llm_weight must be a finite number.");
+    }
+  }
+
+  if (experiment.trigger?.when_path_regex && strategy !== "fixed_args") {
+    warnings.push("when_path_regex usually has no effect for lane_single_call/lane_multi_call unless args include path.");
+  }
+
+  if ((mode === "grading" || mode === "hybrid") && !experiment.grading?.prompt_file && !experiment.selection?.grading?.prompt_file) {
+    warnings.push("No grading.prompt_file configured; default grading prompt will be used.");
+  }
+
+  return { errors, warnings };
+}
+
 function samplePass(sampleRate: number | undefined): boolean {
   if (sampleRate == null) return true;
   if (sampleRate <= 0) return false;
@@ -82,16 +153,20 @@ function samplePass(sampleRate: number | undefined): boolean {
   return Math.random() < sampleRate;
 }
 
-export function selectExperimentForEdit(
+export function selectExperimentForTool(
   cwd: string,
-  args: { path?: string; oldText?: string },
+  toolName: string,
+  args: Record<string, unknown>,
   nowMs: number,
   cooldownState: Map<string, number>,
+  opts?: { executionStrategy?: "fixed_args" | "lane_single_call" | "lane_multi_call" },
 ): LoadedExperiment | null {
   const experiments = loadExperiments(cwd)
     .filter((e) => e.experiment.enabled !== false)
-    .filter((e) => e.experiment.target_tool === "edit")
-    .filter((e) => e.experiment.trigger?.tool === "edit");
+    .filter((e) => (e.validation?.errors?.length ?? 0) === 0)
+    .filter((e) => e.experiment.target_tool === toolName)
+    .filter((e) => e.experiment.trigger?.tool === toolName)
+    .filter((e) => !opts?.executionStrategy || canonicalExecutionStrategy(e.experiment.execution_strategy) === opts.executionStrategy);
 
   for (const loaded of experiments) {
     const ex = loaded.experiment;
@@ -99,14 +174,16 @@ export function selectExperimentForEdit(
     if (!samplePass(ex.trigger.sample_rate)) continue;
 
     if (ex.trigger.when_oldtext_min_chars != null) {
-      const len = (args.oldText ?? "").length;
-      if (len < ex.trigger.when_oldtext_min_chars) continue;
+      const oldText = typeof args.oldText === "string" ? args.oldText : "";
+      if (oldText.length < ex.trigger.when_oldtext_min_chars) continue;
     }
 
-    if (ex.trigger.when_path_regex && args.path) {
+    if (ex.trigger.when_path_regex) {
+      const rawPath = typeof args.path === "string" ? args.path : undefined;
+      if (!rawPath) continue;
       const re = new RegExp(ex.trigger.when_path_regex);
-      const rel = args.path.startsWith("/") ? args.path : resolve(cwd, args.path).replace(cwd + "/", "");
-      if (!re.test(rel) && !re.test(args.path)) continue;
+      const rel = rawPath.startsWith("/") ? rawPath : resolve(cwd, rawPath).replace(cwd + "/", "");
+      if (!re.test(rel) && !re.test(rawPath)) continue;
     }
 
     const cooldownMs = ex.trigger.cooldown_ms ?? 0;
@@ -121,9 +198,27 @@ export function selectExperimentForEdit(
   return null;
 }
 
+export function selectExperimentForEdit(
+  cwd: string,
+  args: { path?: string; oldText?: string },
+  nowMs: number,
+  cooldownState: Map<string, number>,
+): LoadedExperiment | null {
+  return selectExperimentForTool(cwd, "edit", args as Record<string, unknown>, nowMs, cooldownState, {
+    executionStrategy: "fixed_args",
+  });
+}
+
 export function formatExperimentSummary(loaded: LoadedExperiment): string {
   const ex = loaded.experiment;
-  return `${ex.id} (${loaded.source}, mode=${ex.mode}, lanes=${ex.lanes.length}) from ${basename(loaded.path)}`;
+  const strategy = canonicalExecutionStrategy(ex.execution_strategy);
+  const validationBadge =
+    (loaded.validation?.errors?.length ?? 0) > 0
+      ? " [invalid]"
+      : (loaded.validation?.warnings?.length ?? 0) > 0
+        ? " [warn]"
+        : "";
+  return `${ex.id} (${loaded.source}, tool=${ex.target_tool}, mode=${ex.mode}, strategy=${strategy}, lanes=${ex.lanes.length}) from ${basename(loaded.path)}${validationBadge}`;
 }
 
 export function resolveConfiguredPath(value: string, cwd: string, configPath?: string): string {
