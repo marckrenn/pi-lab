@@ -94,6 +94,41 @@ This extension is now **JSON-only** for experiment config.
 > **Note**
 > If the same experiment id exists in both places, the project-local config wins.
 
+### Reusable runtime package model
+
+`pi-ab` is designed to be used as a shared runtime dependency.
+
+In your experiment package, add your own experiment JSON and lane assets:
+
+- `experiments/` → experiment configuration files
+- `lanes/` → lane extension files and lane-local modules
+- `prompts/` → optional grading prompts and lane prompts
+
+Then register the experiment set in your package entry extension:
+
+```ts
+// your-experiment-pkg/index.ts
+import { createAbExtension } from "@marckrenn/pi-ab";
+
+export default createAbExtension({
+  experimentDirs: ["./experiments"],
+});
+```
+
+Lane model in this package is **full extension bundles**:
+- a lane can define one or more extension files
+- those extensions can include tool registration, prompts, hooks, and richer behavior
+
+`fixed_args` is treated as an **input/protocol strategy**.
+For `lane_single_call` / `lane_multi_call`, the system already uses `pi` prompt subprocess execution.
+For `fixed_args`, direct execution is an optimization path and may run directly when possible.
+
+If the direct harness cannot run a lane safely, it automatically falls back to `pi_prompt` harness and records that fallback in lane artifacts (`lane_harness_requested`, `lane_harness_used`, `lane_harness_fallback_reason`).
+
+> **Warning**
+> Lane prompts should be plain files in your bundle (for example `prompts/lane-a.md`).
+> Keep prompt behavior explicit in config and keep package prompt templates separate from lane runtime.
+
 ### Wizard flow
 
 `/ab wizard` asks in user-facing order:

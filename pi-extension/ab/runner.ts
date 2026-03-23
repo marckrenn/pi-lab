@@ -1059,7 +1059,9 @@ export async function runExperimentLanes(
       const beforeContent = existsSync(targetFilePath) ? readFileSync(targetFilePath, "utf8") : "";
 
       const start = Date.now();
-      let laneHarnessUsed: "direct" | "pi_prompt" = requestedLaneHarness === "pi_prompt" ? "pi_prompt" : "direct";
+      const laneHarnessRequested: "direct" | "pi_prompt" = requestedLaneHarness === "pi_prompt" ? "pi_prompt" : "direct";
+      let laneHarnessUsed: "direct" | "pi_prompt" = laneHarnessRequested;
+      let laneHarnessFallbackReason: string | undefined;
       let directLatencyMs: number | undefined;
       let sessionPath: string | undefined;
       let parsed: ReturnType<typeof parseLaneSession> = {
@@ -1104,6 +1106,7 @@ export async function runExperimentLanes(
           // Direct harness failed unexpectedly (e.g. extension load/runtime mismatch).
           // Fall back to legacy pi prompt harness for compatibility.
           laneHarnessUsed = "pi_prompt";
+          laneHarnessFallbackReason = "direct_harness_failed";
         }
       }
 
@@ -1180,7 +1183,9 @@ export async function runExperimentLanes(
           patch_bytes: Buffer.byteLength(patchText, "utf8"),
           session_file: sessionPath,
           worktree_path: worktreePath,
+          lane_harness_requested: laneHarnessRequested,
           lane_harness_used: laneHarnessUsed,
+          lane_harness_fallback_reason: laneHarnessFallbackReason,
         };
       }
 
@@ -1224,7 +1229,9 @@ export async function runExperimentLanes(
         patch_bytes: patchBytes,
         session_file: sessionPath,
         worktree_path: worktreePath,
+        lane_harness_requested: laneHarnessRequested,
         lane_harness_used: laneHarnessUsed,
+        lane_harness_fallback_reason: laneHarnessFallbackReason,
       };
     } catch (err: any) {
       if (!debugEnabledOf(experiment)) {
@@ -1237,6 +1244,9 @@ export async function runExperimentLanes(
         status: "error",
         error: err?.message ?? String(err),
         patch_path: existsSync(patchPath) ? patchPath : undefined,
+        lane_harness_requested: laneHarnessRequested,
+        lane_harness_used: laneHarnessUsed,
+        lane_harness_fallback_reason: laneHarnessFallbackReason,
       };
     } finally {
       const surface = laneSurfaces[laneIndex];
@@ -1409,7 +1419,9 @@ export async function runExperimentLanesFixedArgsTool(
 
       await syncWorkspaceDeltaToWorktree(repoRoot, worktreePath, abortController.signal);
 
-      let laneHarnessUsed: "direct" | "pi_prompt" = requestedLaneHarness === "pi_prompt" ? "pi_prompt" : "direct";
+      const laneHarnessRequested: "direct" | "pi_prompt" = requestedLaneHarness === "pi_prompt" ? "pi_prompt" : "direct";
+      let laneHarnessUsed: "direct" | "pi_prompt" = laneHarnessRequested;
+      let laneHarnessFallbackReason: string | undefined;
 
       try {
         const loadedTools = await loadLaneToolsDirect(lane, cwd, loaded.path, worktreePath, {
@@ -1473,6 +1485,7 @@ export async function runExperimentLanesFixedArgsTool(
           };
         } catch {
           laneHarnessUsed = "pi_prompt";
+          laneHarnessFallbackReason = "direct_harness_failed";
         }
       }
 
@@ -1529,7 +1542,9 @@ export async function runExperimentLanesFixedArgsTool(
           total_tokens: parsed.totalTokens,
           session_file: sessionPath,
           worktree_path: worktreePath,
+          lane_harness_requested: laneHarnessRequested,
           lane_harness_used: laneHarnessUsed,
+          lane_harness_fallback_reason: laneHarnessFallbackReason,
         };
       }
 
@@ -1565,7 +1580,9 @@ export async function runExperimentLanesFixedArgsTool(
         total_tokens: parsed.totalTokens,
         session_file: sessionPath,
         worktree_path: worktreePath,
+        lane_harness_requested: laneHarnessRequested,
         lane_harness_used: laneHarnessUsed,
+        lane_harness_fallback_reason: laneHarnessFallbackReason,
       };
     } catch (err: any) {
       if (!debugEnabledOf(experiment)) {
@@ -1585,6 +1602,9 @@ export async function runExperimentLanesFixedArgsTool(
         lane_id: lane.id,
         status: "error",
         error: err?.message ?? String(err),
+        lane_harness_requested: laneHarnessRequested,
+        lane_harness_used: laneHarnessUsed,
+        lane_harness_fallback_reason: laneHarnessFallbackReason,
       };
     } finally {
       const surface = laneSurfaces[laneIndex];

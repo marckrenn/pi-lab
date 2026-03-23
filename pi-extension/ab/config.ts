@@ -30,6 +30,15 @@ type LegacyFlags = {
   debug_ui?: boolean;
 };
 
+export interface ExperimentLoadOptions {
+  experimentDirs?: string[];
+}
+
+interface ExtraExperimentSource {
+  source: string;
+  path: string;
+}
+
 function laneIdFromRaw(rawLane: any, index: number): string {
   if (typeof rawLane?.id === "string" && rawLane.id.trim()) return rawLane.id.trim();
   if (typeof rawLane?.label === "string" && rawLane.label.trim()) return rawLane.label.trim();
@@ -127,6 +136,28 @@ function listExperimentFiles(dir: string): string[] {
     .map((f) => join(dir, f));
 }
 
+function normalizeExperimentDir(rawDir: string): string {
+  return rawDir.trim();
+}
+
+function collectExtraExperimentFiles(cwd: string, dirs?: string[]): ExtraExperimentSource[] {
+  if (!dirs || dirs.length === 0) return [];
+
+  const unique = new Set<string>();
+  const sources: ExtraExperimentSource[] = [];
+
+  for (const rawDir of dirs) {
+    const trimmed = normalizeExperimentDir(rawDir);
+    if (!trimmed) continue;
+    const absPath = resolve(cwd, trimmed);
+    if (unique.has(absPath)) continue;
+    unique.add(absPath);
+    sources.push({ source: `package:${absPath}`, path: absPath });
+  }
+
+  return sources;
+}
+
 export function getGlobalExperimentsDir(): string {
   return join(homedir(), ".pi", "agent", "ab", "experiments");
 }
@@ -179,9 +210,10 @@ export function getHardcodedWinnerLaneId(experiment: AbExperiment): string {
   return experiment.winner?.hardcoded_lane ?? getBaselineLaneId(experiment);
 }
 
-export function loadExperiments(cwd: string): LoadedExperiment[] {
+export function loadExperiments(cwd: string, options?: ExperimentLoadOptions): LoadedExperiment[] {
   const globalFiles = listExperimentFiles(getGlobalExperimentsDir());
   const projectFiles = listExperimentFiles(getProjectExperimentsDir(cwd));
+  const packageSources = collectExtraExperimentFiles(cwd, options?.experimentDirs);
 
   const merged = new Map<string, LoadedExperiment>();
 
@@ -198,6 +230,24 @@ export function loadExperiments(cwd: string): LoadedExperiment[] {
       }
     } catch {
       // skip malformed/unavailable config file and continue loading others
+    }
+  }
+
+  for (const source of packageSources) {
+    for (const path of listExperimentFiles(source.path)) {
+      try {
+        for (const experiment of readExperimentFile(path)) {
+          if (!experiment?.id) continue;
+          merged.set(experiment.id, {
+            source: source.source,
+            path,
+            experiment,
+            validation: validateExperimentConfig(experiment, path),
+          });
+        }
+      } catch {
+        // skip malformed/unavailable config file and continue loading others
+      }
     }
   }
 
@@ -355,9 +405,12 @@ export function selectExperimentForTool(
   args: Record<string, unknown>,
   nowMs: number,
   cooldownState: Map<string, number>,
-  opts?: { executionStrategy?: "fixed_args" | "lane_single_call" | "lane_multi_call" },
+  opts?: {
+    executionStrategy?: "fixed_args" | "lane_single_call" | "lane_multi_call";
+    experimentDirs?: string[];
+  },
 ): LoadedExperiment | null {
-  const experiments = loadExperiments(cwd)
+  const experiments = loadExperiments(cwd, { experimentDirs: opts?.experimentDirs })
     .filter((e) => e.experiment.enabled !== false)
     .filter((e) => (e.validation?.errors?.length ?? 0) === 0)
     .filter((e) => toolNameOf(e.experiment) === toolName)
@@ -399,9 +452,11 @@ export function selectExperimentForEdit(
   args: { path?: string; oldText?: string },
   nowMs: number,
   cooldownState: Map<string, number>,
+  opts?: { experimentDirs?: string[] },
 ): LoadedExperiment | null {
   return selectExperimentForTool(cwd, "edit", args as Record<string, unknown>, nowMs, cooldownState, {
     executionStrategy: "fixed_args",
+    experimentDirs: opts?.experimentDirs,
   });
 }
 

@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   createBashTool,
@@ -47,6 +49,58 @@ const ReplanFlowParams = Type.Object({
   context: Type.Optional(Type.String({ description: "Optional context for the flow" })),
   constraints: Type.Optional(Type.String({ description: "Optional constraints/instructions" })),
 });
+
+export interface AbExtensionOptions {
+  experimentDirs?: string[];
+}
+
+function detectExtensionCallerDir(): string | undefined {
+  const stack = new Error().stack ?? "";
+  const lines = stack.split("\n").slice(2);
+
+  for (const line of lines) {
+    const match = line.match(/\((.+):\d+:\d+\)$/) ?? line.match(/at (.+):\d+:\d+$/);
+    if (!match) continue;
+
+    let rawPath = match[1];
+    if (!rawPath) continue;
+
+    if (rawPath.startsWith("file://")) {
+      try {
+        rawPath = fileURLToPath(rawPath);
+      } catch {
+        continue;
+      }
+    }
+
+    if (!rawPath.includes("/") && !rawPath.includes("\\")) continue;
+    if (rawPath.includes("node:internal") || rawPath.includes("node_modules/@mariozechner/pi-coding-agent")) continue;
+    if (rawPath.includes("/pi-extension/ab/index.")) continue;
+    if (!rawPath.includes(".") ) continue;
+
+    return dirname(rawPath);
+  }
+
+  return undefined;
+}
+
+function resolveExperimentDirs(experimentDirs: string[] | undefined): string[] {
+  const callerDir = detectExtensionCallerDir() ?? process.cwd();
+  const unique = new Set<string>();
+  const resolved: string[] = [];
+
+  for (const raw of experimentDirs ?? []) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+
+    const abs = resolve(callerDir, trimmed);
+    if (unique.has(abs)) continue;
+    unique.add(abs);
+    resolved.push(abs);
+  }
+
+  return resolved;
+}
 
 function summarizeLaneFailures(records: LaneRunRecord[]) {
   const failures = records
@@ -129,11 +183,13 @@ async function runFixedArgsToolExperiment(
   onUpdate: any,
   ctx: any,
   cooldownState: Map<string, number>,
+  experimentDirs: string[] | undefined,
   nativeTool?: NativeToolDelegate,
 ) {
   const now = Date.now();
   const matched = selectExperimentForTool(ctx.cwd, toolName, params, now, cooldownState, {
     executionStrategy: "fixed_args",
+    experimentDirs,
   });
 
   let loaded = matched;
@@ -144,7 +200,7 @@ async function runFixedArgsToolExperiment(
       return nativeTool.execute(toolCallId, params, signal, onUpdate);
     }
 
-    loaded = loadExperiments(ctx.cwd)
+    loaded = loadExperiments(ctx.cwd, { experimentDirs })
       .filter((e) => e.experiment.enabled !== false)
       .filter((e) => (e.validation?.errors?.length ?? 0) === 0)
       .filter((e) => toolNameOf(e.experiment) === toolName)
@@ -252,10 +308,12 @@ async function runSingleCallFlowExperiment(
   signal: AbortSignal | undefined,
   ctx: any,
   cooldownState: Map<string, number>,
+  experimentDirs: string[] | undefined,
 ) {
   const now = Date.now();
   const loaded = selectExperimentForTool(ctx.cwd, toolName, params as Record<string, unknown>, now, cooldownState, {
     executionStrategy: "lane_single_call",
+    experimentDirs,
   });
   if (!loaded) {
     throw new Error(
@@ -358,10 +416,12 @@ async function runMultiCallFlowExperiment(
   signal: AbortSignal | undefined,
   ctx: any,
   cooldownState: Map<string, number>,
+  experimentDirs: string[] | undefined,
 ) {
   const now = Date.now();
   const loaded = selectExperimentForTool(ctx.cwd, toolName, params as Record<string, unknown>, now, cooldownState, {
     executionStrategy: "lane_multi_call",
+    experimentDirs,
   });
   if (!loaded) {
     throw new Error(
@@ -455,12 +515,12 @@ async function runMultiCallFlowExperiment(
   }
 }
 
-export default function abConductorExtension(pi: ExtensionAPI) {
+function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]) {
   const cooldownState = new Map<string, number>();
 
   pi.on("session_start", (_event, ctx) => {
     const seenFixedArgsTools = new Set<string>();
-    const allExperiments = loadExperiments(ctx.cwd)
+    const allExperiments = loadExperiments(ctx.cwd, { experimentDirs })
       .filter((e) => e.experiment.enabled !== false)
       .filter((e) => (e.validation?.errors?.length ?? 0) === 0)
       .filter((e) => toolNameOf(e.experiment) !== "edit");
@@ -485,7 +545,17 @@ export default function abConductorExtension(pi: ExtensionAPI) {
         parameters: existing?.parameters ?? Type.Object({}, { additionalProperties: true }),
         async execute(toolCallId, params, signal, onUpdate, execCtx) {
           const nativeTool = createNativeToolDelegate(toolName, execCtx.cwd);
-          return runFixedArgsToolExperiment(params as Record<string, unknown>, toolName, toolCallId, signal, onUpdate, execCtx, cooldownState, nativeTool);
+          return runFixedArgsToolExperiment(
+            params as Record<string, unknown>,
+            toolName,
+            toolCallId,
+            signal,
+            onUpdate,
+            execCtx,
+            cooldownState,
+            experimentDirs,
+            nativeTool,
+          );
         },
       });
 
@@ -511,7 +581,7 @@ export default function abConductorExtension(pi: ExtensionAPI) {
         parameters: ReplanFlowParams,
         async execute(_toolCallId, params, signal, _onUpdate, execCtx) {
           try {
-            return await runSingleCallFlowExperiment(params, toolName, signal, execCtx, cooldownState);
+            return await runSingleCallFlowExperiment(params, toolName, signal, execCtx, cooldownState, experimentDirs);
           } catch (err: any) {
             const msg = err?.message ?? String(err);
             if (!msg.includes("No active lane_single_call experiment matched tool")) {
@@ -519,7 +589,7 @@ export default function abConductorExtension(pi: ExtensionAPI) {
             }
           }
 
-          return runMultiCallFlowExperiment(params, toolName, signal, execCtx, cooldownState);
+          return runMultiCallFlowExperiment(params, toolName, signal, execCtx, cooldownState, experimentDirs);
         },
       });
 
@@ -538,7 +608,7 @@ export default function abConductorExtension(pi: ExtensionAPI) {
       }
 
       if (cmd === "status" || cmd === "validate") {
-        const experiments = loadExperiments(ctx.cwd);
+        const experiments = loadExperiments(ctx.cwd, { experimentDirs });
         if (experiments.length === 0) {
           ctx.ui.notify("No A/B experiments found (global or project).", "warning");
           return;
@@ -608,7 +678,7 @@ export default function abConductorExtension(pi: ExtensionAPI) {
       }
 
       const now = Date.now();
-      const loaded = selectExperimentForEdit(ctx.cwd, params, now, cooldownState);
+      const loaded = selectExperimentForEdit(ctx.cwd, params, now, cooldownState, { experimentDirs });
       if (!loaded) {
         return nativeEdit.execute(toolCallId, params, signal, onUpdate);
       }
@@ -792,3 +862,10 @@ export default function abConductorExtension(pi: ExtensionAPI) {
     },
   });
 }
+
+export function createAbExtension(options: AbExtensionOptions = {}): (pi: ExtensionAPI) => void {
+  const experimentDirs = resolveExperimentDirs(options.experimentDirs);
+  return (pi) => createAbConductorExtension(pi, experimentDirs);
+}
+
+export default createAbExtension();

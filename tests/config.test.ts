@@ -1,8 +1,17 @@
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
 import { canonicalExecutionStrategy, loadExperiments, validateExperimentConfig } from "../pi-extension/ab/config.ts";
+
+function mkExp(id: string, tool: string, winner: string = "formula") {
+  return {
+    id,
+    tool: { name: tool },
+    winner: { mode: winner },
+    lanes: [{ id: "A", baseline: true, extensions: ["./a.ts"] }],
+  };
+}
 
 describe("config strategy canonicalization", () => {
   test("maps valid strategies", () => {
@@ -17,7 +26,51 @@ describe("config strategy canonicalization", () => {
   });
 });
 
-describe("config validation", () => {
+describe("config loading", () => {
+  test("supports extra experiment dirs with project override precedence", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "ab-config-extra-"));
+    const projectDir = join(cwd, ".pi", "ab", "experiments");
+    const packageDir = join(cwd, "pkg-experiments");
+    const packageOverrideDir = join(cwd, "pkg-override");
+
+    mkdirSync(projectDir, { recursive: true });
+    mkdirSync(packageDir, { recursive: true });
+    mkdirSync(packageOverrideDir, { recursive: true });
+
+    writeFileSync(join(projectDir, "local.json"), JSON.stringify(mkExp("local", "edit")));
+    writeFileSync(join(packageDir, "shared.json"), JSON.stringify(mkExp("shared", "edit")));
+    writeFileSync(join(packageOverrideDir, "shared.json"), JSON.stringify(mkExp("shared", "edit")));
+    writeFileSync(join(packageOverrideDir, "shadow.json"), JSON.stringify(mkExp("shadow", "edit")));
+
+    writeFileSync(
+      join(projectDir, "shadow.json"),
+      JSON.stringify({
+        id: "shadow",
+        tool: { name: "edit" },
+        winner: { mode: "formula" },
+        lanes: [{ id: "P", baseline: true, extensions: ["./override.ts"] }],
+      }),
+    );
+
+    const experiments = loadExperiments(cwd, {
+      experimentDirs: [
+        packageDir,
+        packageOverrideDir,
+      ],
+    });
+
+    const byId = new Map(experiments.map((ex) => [ex.experiment.id, ex]));
+    const shared = byId.get("shared");
+    const shadow = byId.get("shadow");
+    const local = byId.get("local");
+
+    expect(shared?.source).toBe(`package:${resolve(packageOverrideDir)}`);
+    expect(shadow?.source).toBe("project");
+    expect(local?.source).toBe("project");
+    expect(experiments.some((ex) => ex.experiment.id === "local")).toBe(true);
+    expect(experiments.some((ex) => ex.experiment.id === "shadow")).toBe(true);
+  });
+
   test("warns on path regex for proxy strategies", () => {
     const result = validateExperimentConfig({
       id: "x",
@@ -43,7 +96,6 @@ describe("config validation", () => {
 
     expect(result.errors.some((e) => e.includes("contains unsupported characters"))).toBe(true);
   });
-
 
   test("requires winner.hardcoded_lane in hardcoded mode", () => {
     const result = validateExperimentConfig({

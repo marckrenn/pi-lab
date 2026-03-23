@@ -79,8 +79,10 @@ export interface AbExperiment {
   debug?: DebugConfig;
 }
 
+export type LaneStatus = "not_run_mvp" | "success" | "error" | "timeout";
+
 export interface LoadedExperiment {
-  source: "global" | "project";
+  source: string;
   path: string;
   experiment: AbExperiment;
   validation?: {
@@ -88,8 +90,6 @@ export interface LoadedExperiment {
     warnings: string[];
   };
 }
-
-export type LaneStatus = "not_run_mvp" | "success" | "error" | "timeout";
 
 export interface LaneRunRecord {
   lane_id: string;
@@ -104,6 +104,8 @@ export interface LaneRunRecord {
   worktree_path?: string;
   process_exit_code?: number;
   lane_harness_used?: "direct" | "pi_prompt";
+  lane_harness_requested?: "direct" | "pi_prompt";
+  lane_harness_fallback_reason?: string;
 }
 
 export interface WinnerSelection {
