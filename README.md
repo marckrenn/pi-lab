@@ -108,12 +108,15 @@ Then register the experiment set in your package entry extension:
 
 ```ts
 // your-experiment-pkg/index.ts
-import { createAbExtension } from "@marckrenn/pi-ab";
+import { createAbExtension } from "@your-scope/pi-ab";
 
 export default createAbExtension({
   experimentDirs: ["./experiments"],
 });
 ```
+
+> **Note**
+> Replace `@your-scope/pi-ab` with your published runtime package name.
 
 If you need deterministic path resolution across unusual runtimes, you can set `baseDir` explicitly:
 
@@ -124,9 +127,55 @@ export default createAbExtension({
 });
 ```
 
+#### Example packaged experiment layout
+
+```text
+my-experiment-pack/
+  package.json
+  index.ts
+  experiments/
+    edit-fast.json
+  lanes/
+    edit/
+      baseline.ts
+      variant-a.ts
+  prompts/
+    grade-edit.md
+    variant-a-system.md
+```
+
+Example experiment file from that package:
+
+```json
+{
+  "id": "edit-fast",
+  "enabled": true,
+  "tool": { "name": "edit" },
+  "execution": { "strategy": "fixed_args" },
+  "winner": {
+    "mode": "llm",
+    "llm": {
+      "prompt_file": "../prompts/grade-edit.md"
+    }
+  },
+  "lanes": [
+    {
+      "label": "baseline",
+      "baseline": true,
+      "extensions": ["../lanes/edit/baseline.ts"]
+    },
+    {
+      "label": "variant-a",
+      "extensions": ["../lanes/edit/variant-a.ts"]
+    }
+  ]
+}
+```
+
 Lane model in this package is **full extension bundles**:
 - a lane can define one or more extension files
 - those extensions can include tool registration, prompts, hooks, and richer behavior
+- lane-local prompt/data files should live in the same package and be read explicitly
 
 `fixed_args` is treated as an **input/protocol strategy**.
 For `lane_single_call` / `lane_multi_call`, the system already uses `pi` prompt subprocess execution.
