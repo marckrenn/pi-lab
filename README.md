@@ -13,7 +13,7 @@ It is useful when you want to:
 
 A useful mental model:
 
-- this works at the **lane extension level**
+- this works at the **lane extension level** (`lane`)
 - each lane activates one or more extension files
 - those extensions can:
   - override or provide the tool
@@ -83,8 +83,44 @@ A/B runs accumulate under:
 
 Experiment config files live in:
 
-- **project-local**: `.pi/ab/experiments/*.json` or `*.yaml`
-- **global**: `~/.pi/agent/ab/experiments/*.json` or `*.yaml`
+- **project-local**: `.pi/ab/experiments/*.json`
+- **global**: `~/.pi/agent/ab/experiments/*.json`
+
+JSON is the documented default and all examples in this README use JSON.
+
+YAML is also supported by the loader if you prefer it, but it is optional and less prominent in the docs.
+A YAML version of the same config would look like this:
+
+```yaml
+id: edit-lanes-v1
+enabled: true
+tool:
+  name: edit
+trigger:
+  sample_rate: 1
+  when_path_regex: ^fixtures/ab-test/
+execution:
+  strategy: fixed_args
+  timeout_ms: 15000
+winner:
+  mode: formula
+  formula:
+    objective: min(latency_ms)
+    tie_breakers:
+      - max(success)
+      - min(total_tokens)
+lanes:
+  - label: A
+    extensions:
+      - ./fixtures/ab-test/lanes/edit-perm-a.ts
+  - label: B
+    baseline: true
+    extensions:
+      - ./fixtures/ab-test/lanes/edit-perm-b.ts
+  - label: C
+    extensions:
+      - ./fixtures/ab-test/lanes/edit-perm-c.ts
+```
 
 If the same experiment id exists in both places, the project-local config wins.
 
@@ -132,11 +168,11 @@ That gives you:
 
 ### Which strategy should I use?
 
-| If your situation is... | Use | All lanes share same arguments? |
+| If your situation is... | All lanes share same arguments? | Use |
 |---|---|---|
-| All lanes expose the same tool shape and accept the same args | `fixed_args` | true |
-| Lanes should each make exactly one target-tool call | `lane_single_call` | false |
-| Lanes may need lane-specific replanning or tool chaining | `lane_multi_call` | false |
+| All lanes expose the same tool shape and accept the same args | ✅ | `fixed_args` |
+| Lanes should each make exactly one target-tool call | ❌ | `lane_single_call` |
+| Lanes may need lane-specific replanning or tool chaining | ❌ | `lane_multi_call` |
 
 ### Strategy details
 
@@ -165,9 +201,9 @@ If you prefer different language, you can read it as:
 | `winner.mode` | Who decides? | Inputs used | Typical use |
 |---|---|---|---|
 | `hardcoded` | Explicit configured lane | None | Safe rollout where one lane must always win |
-| `formula` | 🏎️ Formula engine | Metrics like `latency_ms`, `success`, `total_tokens`, `error`, `timeout` | Cheap, fast, deterministic winner selection |
+| `formula` | Formula | Metrics like `latency_ms`, `success`, `total_tokens`, `error`, `timeout` | Cheap, fast, deterministic winner selection |
 | `llm` | LLM judge | Lane outputs + optional tool-call context | Semantic quality selection |
-| `blend` | 🏎️ Formula engine + LLM judge | Metrics + LLM scores | Balance objective metrics and semantic quality |
+| `blend` | Formula + LLM judge | Metrics + LLM scores | Balance objective metrics and semantic quality |
 
 ### Winner modes
 
