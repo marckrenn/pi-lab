@@ -339,7 +339,7 @@ export async function runGradingProcess(
       useCmuxSurface: loaded.experiment.debug === true && debugUiMode !== "none",
     });
 
-    const rawOutPath = join(run.dir, "artifacts", `grading-raw-output-${attempt}.txt`);
+    const rawOutPath = join(run.dir, "artifacts", `grading-raw-output-${attempt}.md`);
     writeFileSync(rawOutPath, `${res.stdout}\n\n--- STDERR ---\n${res.stderr}`, "utf8");
 
     if (res.timedOut) {

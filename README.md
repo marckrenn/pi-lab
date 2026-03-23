@@ -2,22 +2,24 @@
 
 Work-in-progress **pi A/B conductor extension** for transparent tool interception, lane isolation, winner selection, and telemetry.
 
+## What it does (stage-by-stage)
+
+1. **Intercept** – matches a real tool call (`target_tool`) against trigger policy.
+2. **Fork lanes** – runs lane variants in isolated git worktrees (no cross-lane side effects).
+3. **Execute strategy** – runs lanes with `fixed_args`, `lane_single_call`, or `lane_multi_call` protocol.
+4. **Score/select winner** – uses `shadow`, `deterministic`, `grading` (LLM-only), or `hybrid`.
+5. **Apply result** – applies winner patch/output back to the main workspace.
+6. **Persist telemetry** – writes run, lane, grading, and fallback artifacts under `~/.pi/agent/ab/runs/...`.
+
 ## What it supports today
 
 - Transparent interception by `target_tool` + `trigger` policy
-- Three execution strategies:
-  - `fixed_args`
-  - `lane_single_call`
-  - `lane_multi_call`
-- Four winner modes:
-  - `shadow`
-  - `deterministic`
-  - `grading`
-  - `hybrid` (`llm_tiebreaker`, `llm_score`)
+- Three execution strategies: `fixed_args`, `lane_single_call`, `lane_multi_call`
+- Four winner modes: `shadow`, `deterministic`, `grading`, `hybrid`
 - Lane execution in isolated git worktrees
-- Winner patch application back to main workspace (`git apply`, then `--3way` fallback)
+- Winner patch application (`git apply`, then `--3way` fallback)
 - Grading in a separate `pi` process
-- Run artifacts under `~/.pi/agent/ab/runs/<project>/<run-id>/`
+- Config validation via `/ab validate`
 
 ## Quick start
 
@@ -40,11 +42,11 @@ Inside pi:
 
 ### Execution strategy
 
-| Strategy | What lanes receive | Typical harness | Protocol |
-|---|---|---|---|
-| `fixed_args` | Same intercepted args for all lanes | `direct` | Lane calls intercepted tool directly |
-| `lane_single_call` | `{ task, context?, constraints? }` wrapper | `pi_prompt` | Exactly one target-tool call + `LANE_DONE` |
-| `lane_multi_call` | `{ task, context?, constraints? }` wrapper | `pi_prompt` | Multi-step lane flow with strict final JSON |
+| Strategy | What lanes receive | Typical harness | Protocol | Use case |
+|---|---|---|---|---|
+| `fixed_args` | Same intercepted args for all lanes | `direct` | Lane calls intercepted tool directly | Fast apples-to-apples tool implementation comparison |
+| `lane_single_call` | `{ task, context?, constraints? }` wrapper | `pi_prompt` | Exactly one target-tool call + `LANE_DONE` | Enforce one-call discipline while still allowing lane-specific schemas |
+| `lane_multi_call` | `{ task, context?, constraints? }` wrapper | `pi_prompt` | Multi-step lane flow with strict final JSON | Let lanes replan/tool-chain for harder tasks |
 
 ### Winner mode
 
@@ -52,14 +54,13 @@ Inside pi:
 |---|---|
 | `shadow` | Keep primary lane output |
 | `deterministic` | Formula/tie-break based ranking |
-| `grading` | External grader picks winner; fallback policy on failure |
+| `grading` | **LLM-only winner selection** by external grader (with fallback policy on grader failure) |
 | `hybrid` | Deterministic + LLM (`llm_tiebreaker` or `llm_score`) |
 
-## Hybrid template scoring (new)
+## Hybrid template scoring
 
-For `mode: "hybrid"` + `selection.hybrid.mode: "llm_score"`, the final ranking can use template formulas directly.
+For `mode: "hybrid"` + `selection.hybrid.mode: "llm_score"`, final ranking uses template scoring with injected metrics:
 
-Injected metrics per lane:
 - `{llm_score}` (0..1 from grader)
 - `{deterministic_score}` (normalized deterministic rank)
 
@@ -123,7 +124,8 @@ Per-run directory:
 - `lanes/{id}.json` (lane status/metrics/errors)
 - `artifacts/grading-input.json`
 - `artifacts/grading-output.json`
-- `artifacts/grading-raw-output-*.txt`
+- `artifacts/grading-raw-output-*.md`
+- `lanes/<id>/target-before.md` + `lanes/<id>/target-after.md`
 - `sessions/...` for prompt-based lane harness runs
 
 ## Debug controls

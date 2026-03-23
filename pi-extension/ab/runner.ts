@@ -1140,8 +1140,8 @@ export async function runExperimentLanes(
       const afterContent = existsSync(targetFilePath) ? readFileSync(targetFilePath, "utf8") : "";
       // Always generate the lane patch from runtime before/after file snapshots.
       // This avoids HEAD/index drift producing patches that don't apply to the live workspace.
-      const beforePath = join(laneDir, "target-before.txt");
-      const afterPath = join(laneDir, "target-after.txt");
+      const beforePath = join(laneDir, "target-before.md");
+      const afterPath = join(laneDir, "target-after.md");
       writeFileSync(beforePath, beforeContent, "utf8");
       writeFileSync(afterPath, afterContent, "utf8");
 
