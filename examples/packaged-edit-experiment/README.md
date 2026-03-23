@@ -32,3 +32,17 @@ pi -e .
 
 When loaded, `/ab status` should list the `edit-fast` experiment.
 Use any `edit` call in PI; both lanes will be run and compared for matching calls.
+
+## Smoke test
+
+To verify the package end-to-end:
+
+```bash
+npm run smoke
+```
+
+The smoke script checks that:
+- the package loads as a pi extension package
+- `/ab status` can see `edit-fast`
+- an `edit` call triggers the experiment
+- a `run.json` artifact is written for `edit-fast`

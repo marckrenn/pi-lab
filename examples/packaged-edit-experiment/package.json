@@ -3,13 +3,21 @@
   "private": true,
   "version": "0.1.0",
   "description": "Packaged pi-ab sample for a full-extension-bundle edit experiment.",
+  "keywords": ["pi-package", "pi-extension", "ab-testing"],
   "type": "module",
   "main": "index.ts",
   "exports": "./index.ts",
   "scripts": {
-    "pi": "pi -e ."
+    "pi": "pi -e .",
+    "smoke": "bash scripts/smoke.sh"
   },
   "dependencies": {
     "@marckrenn/pi-ab": "file:../.."
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
   }
 }
