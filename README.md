@@ -2,7 +2,7 @@
 
 pi A/B conductor extension for running multiple lane variants behind one tool name, comparing them safely, and returning one selected result.
 
-> ⚠️ **Highly experimental**
+> **Warning**
 > This project is an early idea / toy prototype. It is **not production ready**. Expect breaking schema changes, rough edges, and missing operational features.
 
 It is useful when you want to:
@@ -79,7 +79,7 @@ A/B runs accumulate under:
 - with `--force`, it actually removes those old run folders
 - you can also use `--older-than 7d`, `--project NAME`, or `--all-projects`
 
-> **Note**
+> **Tip**
 > Start with the dry-run version first. It is the safe way to confirm which run folders would be deleted.
 
 ### Where config lives
@@ -139,7 +139,7 @@ That gives you:
 ### Which strategy should I use?
 
 | If your situation is... | All lanes share same arguments? | Use |
-|---|---|---|
+|---|:---:|---|
 | All lanes expose the same tool shape and accept the same args | ✅ | `fixed_args` |
 | Lanes should each make exactly one target-tool call | ❌ | `lane_single_call` |
 | Lanes may need lane-specific replanning or tool chaining | ❌ | `lane_multi_call` |
@@ -152,7 +152,7 @@ That gives you:
 | `lane_single_call` | `{ task, context?, constraints? }` | Exactly one target-tool call + `LANE_DONE` | Best when each lane may shape the call differently, but must stay one-call-only |
 | `lane_multi_call` | `{ task, context?, constraints? }` | Multi-step lane flow + strict final JSON | Best when lane extensions need their own planning or tool chaining |
 
-> **Note**
+> **Tip**
 > If you are unsure, start with `fixed_args`. It is the simplest model and usually the easiest one to debug.
 
 ## Stage 4: Choose winner
@@ -282,7 +282,7 @@ Notes:
 - omitting `winner.formula.objective` defaults to `min(latency_ms)`
 - if no lane is marked `baseline`, the first lane becomes baseline automatically
 
-> **Note**
+> **Tip**
 > The smallest config is intentionally tiny. You can start there and add trigger rules, failure policy, and LLM grading only when you actually need them.
 
 
