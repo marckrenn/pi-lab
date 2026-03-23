@@ -10,6 +10,6 @@
     "pi": "pi -e ."
   },
   "dependencies": {
-    "pi-ab-wip": "file:../.."
+    "@marckrenn/pi-ab": "file:../.."
   }
 }

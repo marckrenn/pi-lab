@@ -1,4 +1,4 @@
-# pi-ab-wip
+# @marckrenn/pi-ab
 
 pi A/B conductor extension for running multiple lane variants behind one tool name, comparing them safely, and returning one selected result.
 
@@ -96,7 +96,7 @@ This extension is now **JSON-only** for experiment config.
 
 ### Reusable runtime package model
 
-`pi-ab` is designed to be used as a shared runtime dependency.
+`@marckrenn/pi-ab` is designed to be used as a shared runtime dependency.
 
 In your experiment package, add your own experiment JSON and lane assets:
 
@@ -104,27 +104,35 @@ In your experiment package, add your own experiment JSON and lane assets:
 - `lanes/` → lane extension files and lane-local modules
 - `prompts/` → optional grading prompts and lane prompts
 
+The package root exposes two import shapes:
+- `createAbExtension` (named export): factory that accepts `experimentDirs`/`baseDir`.
+- default export: already-instantiated extension equivalent to `createAbExtension()`.
+
 Then register the experiment set in your package entry extension:
 
 ```ts
 // your-experiment-pkg/index.ts
-import { createAbExtension } from "@your-scope/pi-ab";
+import { createAbExtension } from "@marckrenn/pi-ab";
 
 export default createAbExtension({
   experimentDirs: ["./experiments"],
 });
 ```
 
-> **Note**
-> Replace `@your-scope/pi-ab` with your published runtime package name.
-
-If you need deterministic path resolution across unusual runtimes, you can set `baseDir` explicitly:
+If you need deterministic path resolution across unusual runtimes, set `baseDir` explicitly:
 
 ```ts
 export default createAbExtension({
   baseDir: import.meta.url,
   experimentDirs: ["./experiments"],
 });
+```
+
+```ts
+// Equivalent "no-options" form using the package default export
+import abExtension from "@marckrenn/pi-ab";
+
+export default abExtension;
 ```
 
 #### Example packaged experiment layout
@@ -172,20 +180,50 @@ Example experiment file from that package:
 }
 ```
 
-Lane model in this package is **full extension bundles**:
-- a lane can define one or more extension files
-- those extensions can include tool registration, prompts, hooks, and richer behavior
-- lane-local prompt/data files should live in the same package and be read explicitly
+A lane in this package is an **ordered extension bundle**:
+- `lanes[n].extensions` can include one or more extension modules.
+- each module must default-export a function like `export default (pi) => { ... }`.
+- all files needed by a lane should live in the same package and be read explicitly.
+- files are loaded into an isolated worktree in array order.
+- for `fixed_args`, each lane must expose the target tool directly (for `edit`, the default edit tool is injected automatically).
 
-`fixed_args` is treated as an **input/protocol strategy**.
-For `lane_single_call` / `lane_multi_call`, the system already uses `pi` prompt subprocess execution.
-For `fixed_args`, direct execution is an optimization path and may run directly when possible.
+`fixed_args` is treated as an **input/protocol strategy** and is optimized with a direct harness when safe:
+- for `lane_single_call` / `lane_multi_call`, runtime uses prompt-based `pi` subprocess execution.
+- for `fixed_args`, runtime tries `direct` first and falls back to `pi_prompt` when direct execution fails.
+- you can force prompt mode with `PI_AB_LANE_HARNESS=pi_prompt`.
 
-If the direct harness cannot run a lane safely, it automatically falls back to `pi_prompt` harness and records that fallback in lane artifacts (`lane_harness_requested`, `lane_harness_used`, `lane_harness_fallback_reason`).
+When direct execution falls back (for any failure reason), the lane record includes:
+- `lane_harness_requested`
+- `lane_harness_used`
+- `lane_harness_fallback_reason`
+
+Relative lane/config paths are resolved first against the current project cwd (if present), then against the experiment file path.
 
 > **Warning**
 > Lane prompts should be plain files in your bundle (for example `prompts/lane-a.md`).
 > Keep prompt behavior explicit in config and keep package prompt templates separate from lane runtime.
+
+## Authoring vs runtime guarantees
+
+### Authoring guarantees
+
+- every experiment must define `tool.name`, `winner.mode`, and at least one lane.
+- if no lane is marked as `baseline`, the runtime marks the first lane as baseline.
+- each `extensions` entry should point to an extension module that default-exports `function (pi)`.
+- lane paths are loaded from local file paths, so bundled lane and prompt assets must be present in your package.
+
+### Runtime guarantees
+
+- a matching experiment config is selected by `tool.name`, strategy, and trigger gates.
+- all selected lanes are run and produce per-lane telemetry in `~/.pi/agent/ab/runs/...`.
+- only one winner lane is selected and applied (or fallback policy is applied).
+- `fixed_args` prefers direct lane execution for speed; if it fails or is overridden, runtime falls back to prompt-based execution.
+- fallback decisions are explicit in telemetry: `run.json` includes `winner_mode`, `selection_source`, and `fallback_reason_code`; lane records include `lane_harness_requested`, `lane_harness_used`, and `lane_harness_fallback_reason`.
+
+### Non-guarantees
+
+- this project intentionally does not promise cross-run telemetry aggregation, cloud dashboards, or remote policy rollout controls.
+- grading quality, semantic correctness, and model-level policy are controlled by your prompt/config, not by the harness.
 
 ### Wizard flow
 
@@ -241,7 +279,7 @@ That gives you:
 
 | Strategy | Lane input | Protocol | Use case |
 |---|---|---|---|
-| `fixed_args` | Same intercepted args for all lanes | Lane calls intercepted tool directly | Best when the experiment is a clean apples-to-apples comparison |
+| `fixed_args` | Same intercepted args for all lanes | Direct tool call preferred; prompt fallback when direct is not safe/possible | Best when the experiment is a clean apples-to-apples comparison |
 | `lane_single_call` | `{ task, context?, constraints? }` | Exactly one target-tool call + `LANE_DONE` | Best when each lane may shape the call differently, but must stay one-call-only |
 | `lane_multi_call` | `{ task, context?, constraints? }` | Multi-step lane flow + strict final JSON | Best when lane extensions need their own planning or tool chaining |
 
@@ -558,7 +596,12 @@ If you are starting from scratch:
 | `fallback_reason_code` | Why a fallback happened |
 | `llm_error_code` | Why LLM judging failed, if it failed |
 | `execution_strategy` | Which runtime lane protocol was used |
-| `lane_harness` | Which harness actually ran |
+| `lane_harness` | Which harness was selected for this experiment run |
+
+Lane records in `lanes/{id}.json` include additional fallback visibility fields:
+- `lane_harness_requested`
+- `lane_harness_used`
+- `lane_harness_fallback_reason`
 
 ## First 5 things to inspect when a run behaves weirdly
 

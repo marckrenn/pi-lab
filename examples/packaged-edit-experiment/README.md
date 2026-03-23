@@ -20,7 +20,7 @@ cd examples/packaged-edit-experiment
 npm install
 ```
 
-`npm install` wires the local root package via `"pi-ab-wip": "file:../.."`.
+`npm install` wires the local root package via `"@marckrenn/pi-ab": "file:../.."`.
 
 ## Run
 
