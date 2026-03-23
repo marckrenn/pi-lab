@@ -11,8 +11,17 @@ It is useful when you want to:
 - let a formula, an LLM, or both choose which lane to proceed with
 - keep a safe fallback lane while still collecting telemetry from alternatives
 
-A lane is usually not just a raw function implementation.
-In practice, each lane activates one or more extension files inside an isolated environment. Those extensions can override a tool, carry a different prompt, or change tool-usage behavior. So the mental model is closer to **comparing lane permutations at the extension/tool-behavior level** than just swapping one function body.
+A useful mental model:
+
+- this works at the **lane extension level**
+- each lane activates one or more extension files
+- those extensions can:
+  - override or provide the tool
+  - carry a different prompt
+  - change tool-use behavior
+  - do different planning in proxy modes
+
+So this is closer to comparing **lane permutations at the extension/tool-behavior level** than just swapping one function body.
 
 ## When to use this
 
