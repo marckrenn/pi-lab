@@ -91,6 +91,8 @@ export interface LoadedExperiment {
   };
 }
 
+export type LaneHarnessFallbackReason = "direct_harness_failed" | "direct_harness_unsupported_extension_api";
+
 export interface LaneRunRecord {
   lane_id: string;
   status: LaneStatus;
@@ -105,7 +107,7 @@ export interface LaneRunRecord {
   process_exit_code?: number;
   lane_harness_used?: "direct" | "pi_prompt";
   lane_harness_requested?: "direct" | "pi_prompt";
-  lane_harness_fallback_reason?: string;
+  lane_harness_fallback_reason?: LaneHarnessFallbackReason;
 }
 
 export interface WinnerSelection {

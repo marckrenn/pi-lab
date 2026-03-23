@@ -2,7 +2,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statS
 import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createEditTool } from "@mariozechner/pi-coding-agent";
-import type { LoadedExperiment, LaneConfig, LaneRunRecord } from "./types.ts";
+import type { LoadedExperiment, LaneConfig, LaneHarnessFallbackReason, LaneRunRecord } from "./types.ts";
 import { canonicalExecutionStrategy, debugEnabledOf, debugUiOf, executionStrategyOf, resolveConfiguredPath, timeoutMsOf } from "./config.ts";
 import type { RunContext } from "./storage.ts";
 import { extractFirstJsonObject, runCommand, safeJsonParse } from "./utils.ts";
@@ -76,6 +76,26 @@ function newestSessionFile(dir: string): string | undefined {
     .map((f) => ({ file: join(dir, f), mtime: statSync(join(dir, f)).mtimeMs }))
     .sort((a, b) => b.mtime - a.mtime);
   return files[0]?.file;
+}
+
+export const DIRECT_HARNESS_FALLBACK_REASONS = {
+  unsupportedExtensionApi: "direct_harness_unsupported_extension_api" as const,
+  failed: "direct_harness_failed" as const,
+};
+
+export class DirectLaneHarnessError extends Error {
+  public readonly fallbackReason: (typeof DIRECT_HARNESS_FALLBACK_REASONS)[keyof typeof DIRECT_HARNESS_FALLBACK_REASONS];
+
+  constructor(message: string, fallbackReason: (typeof DIRECT_HARNESS_FALLBACK_REASONS)[keyof typeof DIRECT_HARNESS_FALLBACK_REASONS]) {
+    super(message);
+    this.fallbackReason = fallbackReason;
+    this.name = "DirectLaneHarnessError";
+  }
+}
+
+export function directHarnessFallbackReasonForError(error: unknown): LaneHarnessFallbackReason {
+  if (error instanceof DirectLaneHarnessError) return error.fallbackReason;
+  return DIRECT_HARNESS_FALLBACK_REASONS.failed;
 }
 
 function parseLaneSession(
@@ -190,37 +210,43 @@ async function withLaneProcessCwd<T>(cwd: string, fn: () => Promise<T>): Promise
 }
 
 function createLaneExtensionApi(toolRegistry: Map<string, DirectLaneTool>): any {
-  const noop = () => undefined;
+  const supportedMethods = new Set(["registerTool", "getActiveTools", "getAllTools", "getFlag", "setModel"]);
+  const unsupportedMessage = (property: string) =>
+    `Direct lane harness does not support extension API '${property}'. This lane requires prompt-mode execution.`;
 
   return new Proxy(
     {},
     {
       get(_target, prop) {
-        if (prop === "registerTool") {
-          return (tool: any) => {
-            if (!tool || typeof tool.name !== "string" || typeof tool.execute !== "function") return;
-            toolRegistry.set(tool.name, tool as DirectLaneTool);
-          };
+        if (typeof prop !== "string") return undefined;
+        if (supportedMethods.has(prop)) {
+          if (prop === "registerTool") {
+            return (tool: any) => {
+              if (!tool || typeof tool.name !== "string" || typeof tool.execute !== "function") return;
+              toolRegistry.set(tool.name, tool as DirectLaneTool);
+            };
+          }
+          if (prop === "getActiveTools") {
+            return () => [...toolRegistry.keys()];
+          }
+          if (prop === "getAllTools") {
+            return () => [...toolRegistry.values()].map((tool) => ({ name: tool.name, description: "" }));
+          }
+          if (prop === "getFlag") {
+            return () => undefined;
+          }
+          if (prop === "setModel") {
+            return async () => false;
+          }
         }
-        if (prop === "getActiveTools") {
-          return () => [...toolRegistry.keys()];
-        }
-        if (prop === "getAllTools") {
-          return () => [...toolRegistry.values()].map((tool) => ({ name: tool.name, description: "" }));
-        }
-        if (prop === "getFlag") {
-          return () => undefined;
-        }
-        if (prop === "setModel") {
-          return async () => false;
-        }
-        return noop;
+
+        throw new DirectLaneHarnessError(unsupportedMessage(String(prop)), DIRECT_HARNESS_FALLBACK_REASONS.unsupportedExtensionApi);
       },
     },
   );
 }
 
-async function loadLaneToolsDirect(
+export async function loadLaneToolsDirect(
   lane: LaneConfig,
   cwd: string,
   loadedPath: string,
@@ -1102,11 +1128,11 @@ export async function runExperimentLanes(
             outputText: direct.outputText,
             isError: direct.isError,
           };
-        } catch {
+        } catch (err: any) {
           // Direct harness failed unexpectedly (e.g. extension load/runtime mismatch).
           // Fall back to legacy pi prompt harness for compatibility.
           laneHarnessUsed = "pi_prompt";
-          laneHarnessFallbackReason = "direct_harness_failed";
+          laneHarnessFallbackReason = directHarnessFallbackReasonForError(err);
         }
       }
 
@@ -1483,9 +1509,9 @@ export async function runExperimentLanesFixedArgsTool(
             outputText: direct.outputText,
             isError: direct.isError,
           };
-        } catch {
+        } catch (err: any) {
           laneHarnessUsed = "pi_prompt";
-          laneHarnessFallbackReason = "direct_harness_failed";
+          laneHarnessFallbackReason = directHarnessFallbackReasonForError(err);
         }
       }
 
