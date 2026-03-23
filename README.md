@@ -86,41 +86,7 @@ Experiment config files live in:
 - **project-local**: `.pi/ab/experiments/*.json`
 - **global**: `~/.pi/agent/ab/experiments/*.json`
 
-JSON is the documented default and all examples in this README use JSON.
-
-YAML is also supported by the loader if you prefer it, but it is optional and less prominent in the docs.
-A YAML version of the same config would look like this:
-
-```yaml
-id: edit-lanes-v1
-enabled: true
-tool:
-  name: edit
-trigger:
-  sample_rate: 1
-  when_path_regex: ^fixtures/ab-test/
-execution:
-  strategy: fixed_args
-  timeout_ms: 15000
-winner:
-  mode: formula
-  formula:
-    objective: min(latency_ms)
-    tie_breakers:
-      - max(success)
-      - min(total_tokens)
-lanes:
-  - label: A
-    extensions:
-      - ./fixtures/ab-test/lanes/edit-perm-a.ts
-  - label: B
-    baseline: true
-    extensions:
-      - ./fixtures/ab-test/lanes/edit-perm-b.ts
-  - label: C
-    extensions:
-      - ./fixtures/ab-test/lanes/edit-perm-c.ts
-```
+This extension is now **JSON-only** for experiment config.
 
 If the same experiment id exists in both places, the project-local config wins.
 

@@ -1,6 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, dirname, extname, join, resolve } from "node:path";
-import { createRequire } from "node:module";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type {
   AbExperiment,
@@ -12,19 +11,6 @@ import type {
   LoadedExperiment,
   WinnerMode,
 } from "./types.ts";
-
-const require = createRequire(import.meta.url);
-
-function parseYamlIfAvailable(raw: string): unknown {
-  try {
-    const YAML = require("yaml") as { parse: (txt: string) => unknown };
-    return YAML.parse(raw);
-  } catch {
-    throw new Error(
-      "YAML config detected but 'yaml' package is not available. Use .json experiment files to avoid npm install, or run npm install.",
-    );
-  }
-}
 
 function slug(input: string): string {
   return input.trim().toLowerCase().replace(/[^a-z0-9-_]+/g, "-").replace(/^-+|-+$/g, "") || "lane";
@@ -126,8 +112,7 @@ function normalizeExperiment(raw: any): AbExperiment {
 
 function readExperimentFile(path: string): AbExperiment[] {
   const raw = readFileSync(path, "utf8");
-  const ext = extname(path).toLowerCase();
-  const parsed = ext === ".json" ? JSON.parse(raw) : parseYamlIfAvailable(raw);
+  const parsed = JSON.parse(raw);
 
   if (!parsed) return [];
   if (Array.isArray(parsed)) return parsed.map(normalizeExperiment);
@@ -138,7 +123,7 @@ function readExperimentFile(path: string): AbExperiment[] {
 function listExperimentFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
-    .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml") || f.endsWith(".json"))
+    .filter((f) => f.endsWith(".json"))
     .map((f) => join(dir, f));
 }
 
