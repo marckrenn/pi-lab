@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
@@ -52,6 +53,11 @@ const ReplanFlowParams = Type.Object({
 
 export interface AbExtensionOptions {
   experimentDirs?: string[];
+  /**
+   * Optional base directory (absolute path or file:// URL) used to resolve relative experimentDirs.
+   * If omitted, pi-ab will attempt to infer the caller extension directory from stack traces.
+   */
+  baseDir?: string;
 }
 
 function detectExtensionCallerDir(): string | undefined {
@@ -84,8 +90,27 @@ function detectExtensionCallerDir(): string | undefined {
   return undefined;
 }
 
-function resolveExperimentDirs(experimentDirs: string[] | undefined): string[] {
-  const callerDir = detectExtensionCallerDir() ?? process.cwd();
+function normalizeBaseDir(baseDir: string | undefined): string | undefined {
+  const trimmed = baseDir?.trim();
+  if (!trimmed) return undefined;
+
+  if (trimmed.startsWith("file://")) {
+    try {
+      return dirname(fileURLToPath(trimmed));
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (trimmed.startsWith("~/")) {
+    return resolve(homedir(), trimmed.slice(2));
+  }
+
+  return resolve(trimmed);
+}
+
+function resolveExperimentDirs(experimentDirs: string[] | undefined, baseDir?: string): string[] {
+  const callerDir = normalizeBaseDir(baseDir) ?? detectExtensionCallerDir() ?? process.cwd();
   const unique = new Set<string>();
   const resolved: string[] = [];
 
@@ -93,7 +118,9 @@ function resolveExperimentDirs(experimentDirs: string[] | undefined): string[] {
     const trimmed = raw.trim();
     if (!trimmed) continue;
 
-    const abs = resolve(callerDir, trimmed);
+    const abs = trimmed.startsWith("~/")
+      ? resolve(homedir(), trimmed.slice(2))
+      : resolve(callerDir, trimmed);
     if (unique.has(abs)) continue;
     unique.add(abs);
     resolved.push(abs);
@@ -864,7 +891,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
 }
 
 export function createAbExtension(options: AbExtensionOptions = {}): (pi: ExtensionAPI) => void {
-  const experimentDirs = resolveExperimentDirs(options.experimentDirs);
+  const experimentDirs = resolveExperimentDirs(options.experimentDirs, options.baseDir);
   return (pi) => createAbConductorExtension(pi, experimentDirs);
 }
 

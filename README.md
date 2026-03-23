@@ -115,6 +115,15 @@ export default createAbExtension({
 });
 ```
 
+If you need deterministic path resolution across unusual runtimes, you can set `baseDir` explicitly:
+
+```ts
+export default createAbExtension({
+  baseDir: import.meta.url,
+  experimentDirs: ["./experiments"],
+});
+```
+
 Lane model in this package is **full extension bundles**:
 - a lane can define one or more extension files
 - those extensions can include tool registration, prompts, hooks, and richer behavior
