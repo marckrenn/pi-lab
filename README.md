@@ -38,9 +38,29 @@ Inside pi:
 /ab gc --keep-last 10 --force # delete
 ```
 
-## Core concepts
+## Core concepts (mapped to the 6 stages)
 
-### Execution strategy
+- [Stage 1: Intercept](#stage-1-intercept)
+- [Stage 2: Fork lanes](#stage-2-fork-lanes)
+- [Stage 3: Execute strategy](#stage-3-execute-strategy)
+- [Stage 4: Score and select winner](#stage-4-score-and-select-winner)
+- [Stage 5: Apply result](#stage-5-apply-result)
+- [Stage 6: Persist telemetry](#stage-6-persist-telemetry)
+
+### Stage 1: Intercept
+
+The conductor matches real tool calls using:
+- `target_tool`
+- `trigger.tool`
+- optional trigger gates (`sample_rate`, path/oldText constraints, cooldown)
+
+If no valid enabled experiment matches, the tool call proceeds normally.
+
+### Stage 2: Fork lanes
+
+Each lane runs in an isolated git worktree so lane side effects do not pollute each other or the main workspace.
+
+### Stage 3: Execute strategy
 
 | Strategy | What lanes receive | Typical harness | Protocol | Use case |
 |---|---|---|---|---|
@@ -48,14 +68,22 @@ Inside pi:
 | `lane_single_call` | `{ task, context?, constraints? }` wrapper | `pi_prompt` | Exactly one target-tool call + `LANE_DONE` | Enforce one-call discipline while still allowing lane-specific schemas |
 | `lane_multi_call` | `{ task, context?, constraints? }` wrapper | `pi_prompt` | Multi-step lane flow with strict final JSON | Let lanes replan/tool-chain for harder tasks |
 
-### Winner mode
+### Stage 4: Score and select winner
 
-| Mode | Behavior |
-|---|---|
-| `shadow` | Keep primary lane output |
-| `deterministic` | Formula/tie-break based ranking |
-| `grading` | **LLM-only winner selection** by external grader (with fallback policy on grader failure) |
-| `hybrid` | Deterministic + LLM (`llm_tiebreaker` or `llm_score`) |
+| Mode | Behavior | Use case |
+|---|---|---|
+| `shadow` | Keep primary lane output | Safety-first rollout or passive benchmarking |
+| `deterministic` | Formula/tie-break based ranking | Low-cost, explainable ranking from metrics |
+| `grading` | **LLM-only winner selection** by external grader (with fallback policy on grader failure) | Quality-first selection when semantic correctness matters most |
+| `hybrid` | Deterministic + LLM (`llm_tiebreaker` or `llm_score`) | Blend objective metrics with semantic judgment |
+
+### Stage 5: Apply result
+
+Winner patch/output is applied back to the main workspace (`git apply`, then `--3way` fallback when needed).
+
+### Stage 6: Persist telemetry
+
+Run/lane/grading/fallback artifacts are written under `~/.pi/agent/ab/runs/<project>/<run-id>/`.
 
 ## Hybrid template scoring
 
