@@ -1,12 +1,13 @@
-import { chooseDeterministicLane, getPrimaryLaneId, rankDeterministicLanes, type ExtraMetricsByLane } from "./selection.ts";
+import { blendConfigOf, getBaselineLaneId, getHardcodedWinnerLaneId, toolNameOf, winnerModeOf } from "./config.ts";
+import { chooseFormulaLane, rankFormulaLanes, type ExtraMetricsByLane } from "./selection.ts";
 import { runGradingProcess } from "./grading.ts";
 import type { AbExperiment, LaneRunRecord, LoadedExperiment, WinnerSelection } from "./types.ts";
 
 export function defaultPolicy(experiment: LoadedExperiment["experiment"]) {
   const fp = experiment.failure_policy ?? {};
   return {
-    on_grading_failure: fp.on_grading_failure ?? "fallback_deterministic_then_shadow",
-    on_winner_apply_failure: fp.on_winner_apply_failure ?? "fallback_primary_then_fail",
+    on_llm_failure: fp.on_llm_failure ?? "fallback_formula_then_baseline",
+    on_winner_apply_failure: fp.on_winner_apply_failure ?? "fallback_baseline_then_fail",
     all_lanes_failed: fp.all_lanes_failed ?? "fail_tool_call",
   };
 }
@@ -22,56 +23,56 @@ export function laneById(records: LaneRunRecord[], id: string): LaneRunRecord | 
   return records.find((r) => r.lane_id === id);
 }
 
-function deterministicFallback(
+function formulaFallback(
   loaded: LoadedExperiment,
   records: LaneRunRecord[],
-  gradeError: { error?: string; error_code?: string },
+  llmError: { error?: string; error_code?: string },
   modeUsed: WinnerSelection["mode_used"],
 ): WinnerSelection {
   const experiment = loaded.experiment;
   const policy = defaultPolicy(experiment);
-  const primaryLaneId = getPrimaryLaneId(experiment);
+  const baselineLaneId = getBaselineLaneId(experiment);
 
-  const picked = chooseDeterministicLane(experiment, records);
-  if (picked.laneId && policy.on_grading_failure === "fallback_deterministic_then_shadow") {
+  const picked = chooseFormulaLane(experiment, records);
+  if (picked.laneId && policy.on_llm_failure === "fallback_formula_then_baseline") {
     return {
       winner_lane_id: picked.laneId,
       mode_used: modeUsed,
-      reason: `grading fallback: ${picked.reason}`,
-      selection_source: "grading_fallback_deterministic",
-      fallback_reason_code: gradeError.error_code ?? "grading_no_result",
-      grading_error: gradeError.error,
-      grading_error_code: gradeError.error_code,
+      reason: `llm fallback: ${picked.reason}`,
+      selection_source: "llm_fallback_formula",
+      fallback_reason_code: llmError.error_code ?? "llm_no_result",
+      llm_error: llmError.error,
+      llm_error_code: llmError.error_code,
     };
   }
 
   return {
-    winner_lane_id: primaryLaneId,
+    winner_lane_id: baselineLaneId,
     mode_used: modeUsed,
-    reason: "grading failed; fallback shadow primary",
-    selection_source: "grading_fallback_shadow",
-    fallback_reason_code: gradeError.error_code ?? "grading_no_result",
-    grading_error: gradeError.error,
-    grading_error_code: gradeError.error_code,
+    reason: "llm failed; fallback baseline lane",
+    selection_source: "llm_fallback_baseline",
+    fallback_reason_code: llmError.error_code ?? "llm_no_result",
+    llm_error: llmError.error,
+    llm_error_code: llmError.error_code,
   };
 }
 
-function hybridFinalScoringExperiment(
+function blendFinalScoringExperiment(
   experiment: AbExperiment,
-  deterministicWeight: number,
+  formulaWeight: number,
   llmWeight: number,
 ): AbExperiment {
-  const hybrid = experiment.selection?.hybrid ?? {};
+  const blend = blendConfigOf(experiment);
   const objective =
-    hybrid.final_objective ??
-    `max({deterministic_score} * ${deterministicWeight} + {llm_score} * ${llmWeight})`;
-  const tieBreakers = hybrid.final_tie_breakers ?? ["max(llm_score)", "max(deterministic_score)"];
+    blend.objective ??
+    `max({formula_score} * ${formulaWeight} + {llm_score} * ${llmWeight})`;
+  const tieBreakers = blend.tie_breakers ?? ["max(llm_score)", "max(formula_score)"];
 
   return {
     ...experiment,
-    selection: {
-      ...experiment.selection,
-      deterministic: {
+    winner: {
+      ...experiment.winner,
+      formula: {
         objective,
         tie_breakers: tieBreakers,
       },
@@ -79,7 +80,7 @@ function hybridFinalScoringExperiment(
   };
 }
 
-async function selectHybridWinner(
+async function selectBlendWinner(
   loaded: LoadedExperiment,
   run: { runId: string; dir: string },
   cwd: string,
@@ -90,24 +91,24 @@ async function selectHybridWinner(
   signal?: AbortSignal,
 ): Promise<WinnerSelection> {
   const experiment = loaded.experiment;
-  const hybrid = experiment.selection?.hybrid ?? {};
-  const hybridMode = hybrid.mode ?? "llm_tiebreaker";
+  const blend = blendConfigOf(experiment);
+  const blendMode = blend.mode ?? "llm_tiebreaker";
 
-  const ranking = rankDeterministicLanes(experiment, success);
-  const deterministicWinner = ranking.sorted[0];
-  if (!deterministicWinner) {
-    throw new Error("Hybrid selection found no deterministic winner.");
+  const ranking = rankFormulaLanes(experiment, success);
+  const formulaWinner = ranking.sorted[0];
+  if (!formulaWinner) {
+    throw new Error("Blend selection found no formula winner.");
   }
 
-  if (hybridMode === "llm_tiebreaker") {
-    const tieGroup = ranking.sorted.filter((lane) => ranking.compareWithoutIdFallback(lane, deterministicWinner) === 0);
+  if (blendMode === "llm_tiebreaker") {
+    const tieGroup = ranking.sorted.filter((lane) => ranking.compareWithoutIdFallback(lane, formulaWinner) === 0);
 
     if (tieGroup.length <= 1) {
       return {
-        winner_lane_id: deterministicWinner.lane_id,
-        mode_used: "hybrid",
-        reason: `hybrid llm_tiebreaker: no deterministic tie (${ranking.reason})`,
-        selection_source: "hybrid_deterministic_no_tie",
+        winner_lane_id: formulaWinner.lane_id,
+        mode_used: "blend",
+        reason: `blend llm_tiebreaker: no formula tie (${ranking.reason})`,
+        selection_source: "blend_formula_no_tie",
       };
     }
 
@@ -118,16 +119,15 @@ async function selectHybridWinner(
     if (grade.result && gradeWinner && gradeWinnerUsable) {
       return {
         winner_lane_id: gradeWinner,
-        mode_used: "hybrid",
-        reason: `hybrid llm_tiebreaker winner among ${tieGroup.length} tied lanes`,
-        selection_source: "hybrid_llm_tiebreaker",
+        mode_used: "blend",
+        reason: `blend llm_tiebreaker winner among ${tieGroup.length} tied lanes`,
+        selection_source: "blend_llm_tiebreaker",
       };
     }
 
-    return deterministicFallback(loaded, records, grade, "hybrid");
+    return formulaFallback(loaded, records, grade, "blend");
   }
 
-  // hybrid llm_score mode
   const grade = await runGradingProcess(loaded, run, cwd, success, gradingContext, model, signal);
   const llmScores = new Map<string, number>();
 
@@ -138,48 +138,48 @@ async function selectHybridWinner(
   }
 
   if (!grade.result || llmScores.size === 0) {
-    return deterministicFallback(loaded, records, grade, "hybrid");
+    return formulaFallback(loaded, records, grade, "blend");
   }
 
-  const deterministicOrder = ranking.sorted;
-  const deterministicScores = new Map<string, number>();
-  if (deterministicOrder.length <= 1) {
-    if (deterministicOrder[0]) deterministicScores.set(deterministicOrder[0].lane_id, 1);
+  const formulaOrder = ranking.sorted;
+  const formulaScores = new Map<string, number>();
+  if (formulaOrder.length <= 1) {
+    if (formulaOrder[0]) formulaScores.set(formulaOrder[0].lane_id, 1);
   } else {
-    const maxIndex = deterministicOrder.length - 1;
-    deterministicOrder.forEach((lane, index) => {
+    const maxIndex = formulaOrder.length - 1;
+    formulaOrder.forEach((lane, index) => {
       const score = 1 - index / maxIndex;
-      deterministicScores.set(lane.lane_id, score);
+      formulaScores.set(lane.lane_id, score);
     });
   }
 
-  const deterministicWeight = Number.isFinite(hybrid.deterministic_weight) ? Number(hybrid.deterministic_weight) : 1;
-  const llmWeight = Number.isFinite(hybrid.llm_weight) ? Number(hybrid.llm_weight) : 1;
+  const formulaWeight = Number.isFinite(blend.formula_weight) ? Number(blend.formula_weight) : 1;
+  const llmWeight = Number.isFinite(blend.llm_weight) ? Number(blend.llm_weight) : 1;
 
   const extraMetricsByLane: ExtraMetricsByLane = {};
-  for (const lane of deterministicOrder) {
+  for (const lane of formulaOrder) {
     extraMetricsByLane[lane.lane_id] = {
       llm_score: llmScores.get(lane.lane_id) ?? 0,
-      deterministic_score: deterministicScores.get(lane.lane_id) ?? 0,
+      formula_score: formulaScores.get(lane.lane_id) ?? 0,
     };
   }
 
-  const finalExperiment = hybridFinalScoringExperiment(experiment, deterministicWeight, llmWeight);
-  const finalRanking = rankDeterministicLanes(finalExperiment, deterministicOrder, extraMetricsByLane);
+  const finalExperiment = blendFinalScoringExperiment(experiment, formulaWeight, llmWeight);
+  const finalRanking = rankFormulaLanes(finalExperiment, formulaOrder, extraMetricsByLane);
   const bestLane = finalRanking.sorted[0];
 
   if (!bestLane) {
-    return deterministicFallback(loaded, records, {
-      error: "hybrid llm_score produced no winner",
-      error_code: "grading_output_invalid_schema",
-    }, "hybrid");
+    return formulaFallback(loaded, records, {
+      error: "blend llm_score produced no winner",
+      error_code: "llm_output_invalid_schema",
+    }, "blend");
   }
 
   return {
     winner_lane_id: bestLane.lane_id,
-    mode_used: "hybrid",
-    reason: `hybrid llm_score via template scoring (${finalRanking.reason})`,
-    selection_source: "hybrid_llm_score",
+    mode_used: "blend",
+    reason: `blend llm_score via formula scoring (${finalRanking.reason})`,
+    selection_source: "blend_llm_score",
   };
 }
 
@@ -194,47 +194,49 @@ export async function selectWinner(
 ): Promise<WinnerSelection> {
   const experiment = loaded.experiment;
   const policy = defaultPolicy(experiment);
-  const primaryLaneId = getPrimaryLaneId(experiment);
-  const success = successfulLanes(records, experiment.target_tool);
+  const baselineLaneId = getBaselineLaneId(experiment);
+  const targetTool = toolNameOf(experiment);
+  const success = successfulLanes(records, targetTool);
+  const winnerMode = winnerModeOf(experiment);
 
-  if (experiment.winner_mode === "shadow") {
+  if (winnerMode === "hardcoded") {
+    const hardcodedLaneId = getHardcodedWinnerLaneId(experiment);
     return {
-      winner_lane_id: primaryLaneId,
-      mode_used: "shadow",
-      reason: "shadow mode: primary lane is always selected",
-      selection_source: "shadow_primary_forced",
+      winner_lane_id: hardcodedLaneId,
+      mode_used: "hardcoded",
+      reason: "hardcoded mode: configured lane is always selected",
+      selection_source: "hardcoded_lane_forced",
     };
   }
 
   if (success.length === 0) {
-    if (policy.all_lanes_failed === "fallback_primary") {
+    if (policy.all_lanes_failed === "fallback_baseline") {
       return {
-        winner_lane_id: primaryLaneId,
-        mode_used: "shadow",
-        reason: "all lanes failed; fallback_primary policy",
-        selection_source: "fallback_shadow_primary",
+        winner_lane_id: baselineLaneId,
+        mode_used: "hardcoded",
+        reason: "all lanes failed; fallback_baseline policy",
+        selection_source: "fallback_baseline",
         fallback_reason_code: "all_lanes_failed",
       };
     }
     throw new Error("All experiment lanes failed.");
   }
 
-  if (experiment.winner_mode === "deterministic") {
-    const picked = chooseDeterministicLane(experiment, records);
-    if (!picked.laneId) throw new Error("Deterministic selection found no winner.");
+  if (winnerMode === "formula") {
+    const picked = chooseFormulaLane(experiment, records);
+    if (!picked.laneId) throw new Error("Formula selection found no winner.");
     return {
       winner_lane_id: picked.laneId,
-      mode_used: "deterministic",
+      mode_used: "formula",
       reason: picked.reason,
-      selection_source: "deterministic",
+      selection_source: "formula",
     };
   }
 
-  if (experiment.winner_mode === "hybrid") {
-    return selectHybridWinner(loaded, run, cwd, records, success, gradingContext, model, signal);
+  if (winnerMode === "blend") {
+    return selectBlendWinner(loaded, run, cwd, records, success, gradingContext, model, signal);
   }
 
-  // grading mode
   const grade = await runGradingProcess(loaded, run, cwd, records, gradingContext, model, signal);
   const gradeWinner = grade.result?.winner_lane_id;
   const gradeWinnerUsable = gradeWinner ? success.some((r) => r.lane_id === gradeWinner) : false;
@@ -242,36 +244,36 @@ export async function selectWinner(
   if (grade.result && gradeWinner && gradeWinnerUsable) {
     return {
       winner_lane_id: gradeWinner,
-      mode_used: "grading",
-      reason: "grading process winner",
-      selection_source: "grading",
+      mode_used: "llm",
+      reason: "llm grading winner",
+      selection_source: "llm",
     };
   }
 
-  const gradingFailureCode = grade.error_code ?? (gradeWinner ? "grading_winner_not_successful" : "grading_no_result");
+  const llmFailureCode = grade.error_code ?? (gradeWinner ? "llm_winner_not_successful" : "llm_no_result");
 
-  if (policy.on_grading_failure === "fallback_deterministic_then_shadow") {
-    const picked = chooseDeterministicLane(experiment, records);
+  if (policy.on_llm_failure === "fallback_formula_then_baseline") {
+    const picked = chooseFormulaLane(experiment, records);
     if (picked.laneId) {
       return {
         winner_lane_id: picked.laneId,
-        mode_used: "grading-fallback-deterministic",
-        reason: `grading fallback: ${picked.reason}`,
-        selection_source: "grading_fallback_deterministic",
-        fallback_reason_code: gradingFailureCode,
-        grading_error: grade.error,
-        grading_error_code: grade.error_code,
+        mode_used: "llm-fallback-formula",
+        reason: `llm fallback: ${picked.reason}`,
+        selection_source: "llm_fallback_formula",
+        fallback_reason_code: llmFailureCode,
+        llm_error: grade.error,
+        llm_error_code: grade.error_code,
       };
     }
   }
 
   return {
-    winner_lane_id: primaryLaneId,
-    mode_used: "grading-fallback-shadow",
-    reason: "grading failed; fallback shadow primary",
-    selection_source: "grading_fallback_shadow",
-    fallback_reason_code: gradingFailureCode,
-    grading_error: grade.error,
-    grading_error_code: grade.error_code,
+    winner_lane_id: baselineLaneId,
+    mode_used: "llm-fallback-baseline",
+    reason: "llm failed; fallback baseline lane",
+    selection_source: "llm_fallback_baseline",
+    fallback_reason_code: llmFailureCode,
+    llm_error: grade.error,
+    llm_error_code: grade.error_code,
   };
 }

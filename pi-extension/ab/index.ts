@@ -10,13 +10,16 @@ import {
   createWriteTool,
 } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { getPrimaryLaneId } from "./selection.ts";
+import { getBaselineLaneId } from "./selection.ts";
 import {
   canonicalExecutionStrategy,
+  executionStrategyOf,
   formatExperimentSummary,
   loadExperiments,
   selectExperimentForEdit,
   selectExperimentForTool,
+  toolNameOf,
+  winnerModeOf,
 } from "./config.ts";
 import { createRunContext, writeLaneRecords, writeRunManifest } from "./storage.ts";
 import { runAbWizard } from "./wizard.ts";
@@ -144,8 +147,8 @@ async function runFixedArgsToolExperiment(
     loaded = loadExperiments(ctx.cwd)
       .filter((e) => e.experiment.enabled !== false)
       .filter((e) => (e.validation?.errors?.length ?? 0) === 0)
-      .filter((e) => e.experiment.target_tool === toolName)
-      .find((e) => canonicalExecutionStrategy(e.experiment.execution_strategy) === "fixed_args") ?? null;
+      .filter((e) => toolNameOf(e.experiment) === toolName)
+      .find((e) => canonicalExecutionStrategy(executionStrategyOf(e.experiment)) === "fixed_args") ?? null;
 
     if (!loaded) {
       throw new Error(
@@ -163,11 +166,11 @@ async function runFixedArgsToolExperiment(
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
-    configured_winner_mode: experiment.winner_mode,
+    configured_winner_mode: winnerModeOf(experiment),
     intercepted_tool: toolName,
     intercepted_args: params,
-    execution_strategy: canonicalExecutionStrategy(experiment.execution_strategy),
-    lane_harness: process.env.PI_AB_LANE_HARNESS ?? inferLaneHarness(experiment.execution_strategy),
+    execution_strategy: canonicalExecutionStrategy(executionStrategyOf(experiment)),
+    lane_harness: process.env.PI_AB_LANE_HARNESS ?? inferLaneHarness(executionStrategyOf(experiment)),
     trigger_bypassed: triggerBypassed || undefined,
     trigger_bypass_reason: triggerBypassed ? "no_native_delegate_for_nonmatching_trigger" : undefined,
     stage: "started",
@@ -211,7 +214,7 @@ async function runFixedArgsToolExperiment(
       reason: winner.reason,
       selection_source: winner.selection_source,
       fallback_reason_code: winner.fallback_reason_code,
-      grading_error_code: winner.grading_error_code,
+      llm_error_code: winner.llm_error_code,
     });
 
     return {
@@ -224,8 +227,8 @@ async function runFixedArgsToolExperiment(
           winner_mode: winner.mode_used,
           selection_source: winner.selection_source,
           fallback_reason_code: winner.fallback_reason_code,
-          grading_error: winner.grading_error,
-          grading_error_code: winner.grading_error_code,
+          llm_error: winner.llm_error,
+          llm_error_code: winner.llm_error_code,
           capability_policy: laneRun.fairness.capability_policy,
         },
       },
@@ -256,7 +259,7 @@ async function runSingleCallFlowExperiment(
   });
   if (!loaded) {
     throw new Error(
-      `No active lane_single_call experiment matched tool '${toolName}'. Configure target_tool='${toolName}' and execution_strategy='lane_single_call'.`,
+      `No active lane_single_call experiment matched tool '${toolName}'. Configure tool.name='${toolName}' and execution.strategy='lane_single_call'.`,
     );
   }
 
@@ -267,15 +270,15 @@ async function runSingleCallFlowExperiment(
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
-    configured_winner_mode: experiment.winner_mode,
+    configured_winner_mode: winnerModeOf(experiment),
     intercepted_tool: toolName,
     intercepted_args: {
       task_len: params.task.length,
       context_len: (params.context ?? "").length,
       constraints_len: (params.constraints ?? "").length,
     },
-    execution_strategy: canonicalExecutionStrategy(experiment.execution_strategy),
-    lane_harness: inferLaneHarness(experiment.execution_strategy),
+    execution_strategy: canonicalExecutionStrategy(executionStrategyOf(experiment)),
+    lane_harness: inferLaneHarness(executionStrategyOf(experiment)),
     stage: "started",
   });
 
@@ -317,7 +320,7 @@ async function runSingleCallFlowExperiment(
       reason: winner.reason,
       selection_source: winner.selection_source,
       fallback_reason_code: winner.fallback_reason_code,
-      grading_error_code: winner.grading_error_code,
+      llm_error_code: winner.llm_error_code,
     });
 
     return {
@@ -330,8 +333,8 @@ async function runSingleCallFlowExperiment(
           winner_mode: winner.mode_used,
           selection_source: winner.selection_source,
           fallback_reason_code: winner.fallback_reason_code,
-          grading_error: winner.grading_error,
-          grading_error_code: winner.grading_error_code,
+          llm_error: winner.llm_error,
+          llm_error_code: winner.llm_error_code,
           capability_policy: laneRun.fairness.capability_policy,
         },
       },
@@ -362,7 +365,7 @@ async function runMultiCallFlowExperiment(
   });
   if (!loaded) {
     throw new Error(
-      `No active lane_multi_call experiment matched tool '${toolName}'. Configure target_tool='${toolName}' and execution_strategy='lane_multi_call'.`,
+      `No active lane_multi_call experiment matched tool '${toolName}'. Configure tool.name='${toolName}' and execution.strategy='lane_multi_call'.`,
     );
   }
 
@@ -373,15 +376,15 @@ async function runMultiCallFlowExperiment(
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
-    configured_winner_mode: experiment.winner_mode,
+    configured_winner_mode: winnerModeOf(experiment),
     intercepted_tool: toolName,
     intercepted_args: {
       task_len: params.task.length,
       context_len: (params.context ?? "").length,
       constraints_len: (params.constraints ?? "").length,
     },
-    execution_strategy: canonicalExecutionStrategy(experiment.execution_strategy),
-    lane_harness: inferLaneHarness(experiment.execution_strategy),
+    execution_strategy: canonicalExecutionStrategy(executionStrategyOf(experiment)),
+    lane_harness: inferLaneHarness(executionStrategyOf(experiment)),
     stage: "started",
   });
 
@@ -421,7 +424,7 @@ async function runMultiCallFlowExperiment(
       reason: winner.reason,
       selection_source: winner.selection_source,
       fallback_reason_code: winner.fallback_reason_code,
-      grading_error_code: winner.grading_error_code,
+      llm_error_code: winner.llm_error_code,
     });
 
     return {
@@ -434,8 +437,8 @@ async function runMultiCallFlowExperiment(
           winner_mode: winner.mode_used,
           selection_source: winner.selection_source,
           fallback_reason_code: winner.fallback_reason_code,
-          grading_error: winner.grading_error,
-          grading_error_code: winner.grading_error_code,
+          llm_error: winner.llm_error,
+          llm_error_code: winner.llm_error_code,
         },
       },
     };
@@ -460,14 +463,14 @@ export default function abConductorExtension(pi: ExtensionAPI) {
     const allExperiments = loadExperiments(ctx.cwd)
       .filter((e) => e.experiment.enabled !== false)
       .filter((e) => (e.validation?.errors?.length ?? 0) === 0)
-      .filter((e) => e.experiment.target_tool !== "edit");
+      .filter((e) => toolNameOf(e.experiment) !== "edit");
 
     const fixedArgsExperiments = allExperiments.filter(
-      (e) => canonicalExecutionStrategy(e.experiment.execution_strategy) === "fixed_args",
+      (e) => canonicalExecutionStrategy(executionStrategyOf(e.experiment)) === "fixed_args",
     );
 
     for (const loaded of fixedArgsExperiments) {
-      const toolName = loaded.experiment.target_tool;
+      const toolName = toolNameOf(loaded.experiment);
       if (!toolName || seenFixedArgsTools.has(toolName)) continue;
       seenFixedArgsTools.add(toolName);
 
@@ -491,12 +494,12 @@ export default function abConductorExtension(pi: ExtensionAPI) {
 
     const seenProxyTools = new Set<string>();
     const proxyExperiments = allExperiments.filter((e) => {
-      const strategy = canonicalExecutionStrategy(e.experiment.execution_strategy);
+      const strategy = canonicalExecutionStrategy(executionStrategyOf(e.experiment));
       return strategy === "lane_single_call" || strategy === "lane_multi_call";
     });
 
     for (const loaded of proxyExperiments) {
-      const toolName = loaded.experiment.target_tool;
+      const toolName = toolNameOf(loaded.experiment);
       if (!toolName || seenProxyTools.has(toolName) || seenFixedArgsTools.has(toolName)) continue;
       seenProxyTools.add(toolName);
 
@@ -617,11 +620,11 @@ export default function abConductorExtension(pi: ExtensionAPI) {
       writeRunManifest(run, experiment, {
         source: loaded.source,
         config_path: loaded.path,
-        configured_winner_mode: experiment.winner_mode,
+        configured_winner_mode: winnerModeOf(experiment),
         intercepted_tool: "edit",
         intercepted_args: { path: params.path, oldText_len: params.oldText.length, newText_len: params.newText.length },
-        execution_strategy: canonicalExecutionStrategy(experiment.execution_strategy),
-        lane_harness: process.env.PI_AB_LANE_HARNESS ?? inferLaneHarness(experiment.execution_strategy),
+        execution_strategy: canonicalExecutionStrategy(executionStrategyOf(experiment)),
+        lane_harness: process.env.PI_AB_LANE_HARNESS ?? inferLaneHarness(executionStrategyOf(experiment)),
         stage: "started",
       });
 
@@ -670,36 +673,36 @@ export default function abConductorExtension(pi: ExtensionAPI) {
 
         const apply = await applyPatchToMain(ctx.cwd, selected.patch_path, signal);
         if (!apply.ok) {
-          if (policy.on_winner_apply_failure === "fallback_primary_then_fail") {
-            const primary = laneById(lanes, getPrimaryLaneId(experiment));
-            if (primary?.patch_path && primary.patch_path !== selected.patch_path) {
-              const fallbackApply = await applyPatchToMain(ctx.cwd, primary.patch_path, signal);
+          if (policy.on_winner_apply_failure === "fallback_baseline_then_fail") {
+            const baseline = laneById(lanes, getBaselineLaneId(experiment));
+            if (baseline?.patch_path && baseline.patch_path !== selected.patch_path) {
+              const fallbackApply = await applyPatchToMain(ctx.cwd, baseline.patch_path, signal);
               if (fallbackApply.ok) {
-                const patch = readFileSync(primary.patch_path, "utf8");
+                const patch = readFileSync(baseline.patch_path, "utf8");
                 writeRunManifest(run, experiment, {
                   stage: "completed",
-                  winner_lane_id: primary.lane_id,
-                  winner_mode: `${winner.mode_used} + primary-apply-fallback`,
-                  reason: `${winner.reason}; winner apply failed, primary patch applied`,
-                  selection_source: "primary_apply_fallback",
-                  fallback_reason_code: "winner_apply_failed_primary_apply_succeeded",
-                  grading_error_code: winner.grading_error_code,
+                  winner_lane_id: baseline.lane_id,
+                  winner_mode: `${winner.mode_used} + baseline-apply-fallback`,
+                  reason: `${winner.reason}; winner apply failed, baseline patch applied`,
+                  selection_source: "baseline_apply_fallback",
+                  fallback_reason_code: "winner_apply_failed_baseline_apply_succeeded",
+                  llm_error_code: winner.llm_error_code,
                 });
 
                 return {
-                  content: [{ type: "text", text: primary.output_text ?? `Successfully replaced text in ${params.path}.` }],
+                  content: [{ type: "text", text: baseline.output_text ?? `Successfully replaced text in ${params.path}.` }],
                   details: {
                     diff: patch,
                     firstChangedLine: undefined,
                     ab: {
                       run_id: run.runId,
                       experiment_id: experiment.id,
-                      winner_lane_id: primary.lane_id,
+                      winner_lane_id: baseline.lane_id,
                       winner_mode: winner.mode_used,
-                      selection_source: "primary_apply_fallback",
+                      selection_source: "baseline_apply_fallback",
                       fallback_applied: true,
-                      fallback_reason_code: "winner_apply_failed_primary_apply_succeeded",
-                      grading_error_code: winner.grading_error_code,
+                      fallback_reason_code: "winner_apply_failed_baseline_apply_succeeded",
+                      llm_error_code: winner.llm_error_code,
                     },
                   },
                 };
@@ -718,7 +721,7 @@ export default function abConductorExtension(pi: ExtensionAPI) {
           reason: winner.reason,
           selection_source: winner.selection_source,
           fallback_reason_code: winner.fallback_reason_code,
-          grading_error_code: winner.grading_error_code,
+          llm_error_code: winner.llm_error_code,
         });
 
         return {
@@ -733,15 +736,15 @@ export default function abConductorExtension(pi: ExtensionAPI) {
               winner_mode: winner.mode_used,
               selection_source: winner.selection_source,
               fallback_reason_code: winner.fallback_reason_code,
-              grading_error: winner.grading_error,
-              grading_error_code: winner.grading_error_code,
+              llm_error: winner.llm_error,
+              llm_error_code: winner.llm_error_code,
             },
           },
         };
       } catch (err: any) {
         const errorText = err?.message ?? String(err);
 
-        if (policy.all_lanes_failed === "fallback_primary") {
+        if (policy.all_lanes_failed === "fallback_baseline") {
           try {
             const nativeFallback = await nativeEdit.execute(toolCallId, params, signal, onUpdate);
             writeRunManifest(run, experiment, {
@@ -758,7 +761,7 @@ export default function abConductorExtension(pi: ExtensionAPI) {
                 ab: {
                   run_id: run.runId,
                   experiment_id: experiment.id,
-                  configured_winner_mode: experiment.winner_mode,
+                  configured_winner_mode: winnerModeOf(experiment),
                   selection_source: "native_fallback",
                   fallback_native: true,
                   fallback_reason_code: "lane_orchestration_failed_native_fallback",

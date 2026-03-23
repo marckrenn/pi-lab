@@ -2,27 +2,27 @@ import { describe, expect, test } from "bun:test";
 import { selectWinner } from "../pi-extension/ab/winner.ts";
 
 describe("winner selection", () => {
-  test("shadow mode always selects primary lane", async () => {
+  test("hardcoded mode always selects configured hardcoded lane", async () => {
     const loaded: any = {
       source: "project",
       path: "/tmp/x.json",
       experiment: {
         id: "exp",
         enabled: true,
-        target_tool: "edit",
+        tool: { name: "edit" },
         trigger: {},
-        winner_mode: "shadow",
-        execution_strategy: "fixed_args",
+        execution: { strategy: "fixed_args" },
+        winner: { mode: "hardcoded", hardcoded_lane: "B" },
         lanes: [
-          { id: "A", primary: true, extensions: [] },
-          { id: "B", primary: false, extensions: [] },
+          { id: "A", label: "A", baseline: true, extensions: [] },
+          { id: "B", label: "B", baseline: false, extensions: [] },
         ],
       },
     };
 
     const records: any[] = [
-      { lane_id: "A", status: "error", error: "failed" },
-      { lane_id: "B", status: "success", patch_path: "/tmp/p.patch", patch_bytes: 123 },
+      { lane_id: "A", status: "success", patch_path: "/tmp/a.patch", patch_bytes: 120 },
+      { lane_id: "B", status: "error", error: "failed" },
     ];
 
     const result = await selectWinner(
@@ -35,8 +35,8 @@ describe("winner selection", () => {
       undefined,
     );
 
-    expect(result.winner_lane_id).toBe("A");
-    expect(result.mode_used).toBe("shadow");
-    expect(result.selection_source).toBe("shadow_primary_forced");
+    expect(result.winner_lane_id).toBe("B");
+    expect(result.mode_used).toBe("hardcoded");
+    expect(result.selection_source).toBe("hardcoded_lane_forced");
   });
 });

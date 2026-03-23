@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createEditTool } from "@mariozechner/pi-coding-agent";
 import type { LoadedExperiment, LaneConfig, LaneRunRecord } from "./types.ts";
-import { canonicalExecutionStrategy, resolveConfiguredPath } from "./config.ts";
+import { canonicalExecutionStrategy, debugEnabledOf, debugUiOf, executionStrategyOf, resolveConfiguredPath, timeoutMsOf } from "./config.ts";
 import type { RunContext } from "./storage.ts";
 import { extractFirstJsonObject, runCommand, safeJsonParse } from "./utils.ts";
 import {
@@ -933,7 +933,7 @@ export async function runExperimentLanes(
   onProgress?: (snapshot: LaneProgressSnapshot) => void,
 ): Promise<LaneRunRecord[]> {
   const experiment = loaded.experiment;
-  const timeoutMs = experiment.timeout_ms ?? 15000;
+  const timeoutMs = timeoutMsOf(experiment);
   const repoRoot = await getRepoRoot(cwd, signal);
   const headSha = await getHeadSha(repoRoot, signal);
   const relPath = relativeTargetPath(cwd, resolve(cwd, editArgs.path));
@@ -945,12 +945,12 @@ export async function runExperimentLanes(
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
 
   const keepDebugPanes = process.env.PI_AB_KEEP_PANES === "1";
-  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? experiment.debug_ui ?? "none").toLowerCase();
-  const requestedLaneHarness = resolveLaneHarness(experiment.execution_strategy);
+  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? debugUiOf(experiment) ?? "none").toLowerCase();
+  const requestedLaneHarness = resolveLaneHarness(executionStrategyOf(experiment));
 
   let useCmuxDebug =
     requestedLaneHarness === "pi_prompt" &&
-    experiment.debug === true &&
+    debugEnabledOf(experiment) &&
     debugUiMode !== "none" &&
     isCmuxAvailable();
   const laneSurfaces: Array<string | undefined> = [];
@@ -1120,7 +1120,7 @@ export async function runExperimentLanes(
 
         // Keep lane panes human-readable by default.
         // Opt-in JSON event streaming with PI_AB_DEBUG_JSON=1 when needed.
-        if (process.env.PI_AB_DEBUG_JSON === "1" && experiment.debug === true && laneSurfaces[laneIndex]) {
+        if (process.env.PI_AB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
           piArgs.push("--mode", "json");
         }
 
@@ -1162,7 +1162,7 @@ export async function runExperimentLanes(
 
       writeFileSync(patchPath, patchText, "utf8");
 
-      if (!experiment.debug) {
+      if (!debugEnabledOf(experiment)) {
         await removeWorktree(repoRoot, worktreePath);
       }
 
@@ -1227,7 +1227,7 @@ export async function runExperimentLanes(
         lane_harness_used: laneHarnessUsed,
       };
     } catch (err: any) {
-      if (!experiment.debug) {
+      if (!debugEnabledOf(experiment)) {
         try {
           await removeWorktree(repoRoot, worktreePath);
         } catch {}
@@ -1290,7 +1290,7 @@ export async function runExperimentLanesFixedArgsTool(
   onProgress?: (snapshot: LaneProgressSnapshot) => void,
 ): Promise<{ records: LaneRunRecord[]; fairness: CapabilityFairnessTelemetry }> {
   const experiment = loaded.experiment;
-  const timeoutMs = experiment.timeout_ms ?? 15000;
+  const timeoutMs = timeoutMsOf(experiment);
   const repoRoot = await getRepoRoot(cwd, signal);
   const headSha = await getHeadSha(repoRoot, signal);
 
@@ -1299,12 +1299,12 @@ export async function runExperimentLanesFixedArgsTool(
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
 
   const keepDebugPanes = process.env.PI_AB_KEEP_PANES === "1";
-  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? experiment.debug_ui ?? "none").toLowerCase();
-  const requestedLaneHarness = resolveLaneHarness(experiment.execution_strategy);
+  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? debugUiOf(experiment) ?? "none").toLowerCase();
+  const requestedLaneHarness = resolveLaneHarness(executionStrategyOf(experiment));
 
   let useCmuxDebug =
     requestedLaneHarness === "pi_prompt" &&
-    experiment.debug === true &&
+    debugEnabledOf(experiment) &&
     debugUiMode !== "none" &&
     isCmuxAvailable();
 
@@ -1487,7 +1487,7 @@ export async function runExperimentLanesFixedArgsTool(
           "--no-themes",
         ];
 
-        if (process.env.PI_AB_DEBUG_JSON === "1" && experiment.debug === true && laneSurfaces[laneIndex]) {
+        if (process.env.PI_AB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
           piArgs.push("--mode", "json");
         }
 
@@ -1513,7 +1513,7 @@ export async function runExperimentLanesFixedArgsTool(
         piRes.timedOut = true;
       }
 
-      if (!experiment.debug) {
+      if (!debugEnabledOf(experiment)) {
         await removeWorktree(repoRoot, worktreePath);
       }
 
@@ -1568,7 +1568,7 @@ export async function runExperimentLanesFixedArgsTool(
         lane_harness_used: laneHarnessUsed,
       };
     } catch (err: any) {
-      if (!experiment.debug) {
+      if (!debugEnabledOf(experiment)) {
         try {
           await removeWorktree(repoRoot, worktreePath);
         } catch {}
@@ -1647,7 +1647,7 @@ export async function runExperimentLanesSingleCall(
   onProgress?: (snapshot: LaneProgressSnapshot) => void,
 ): Promise<{ records: LaneRunRecord[]; fairness: CapabilityFairnessTelemetry }> {
   const experiment = loaded.experiment;
-  const timeoutMs = experiment.timeout_ms ?? 15000;
+  const timeoutMs = timeoutMsOf(experiment);
   const repoRoot = await getRepoRoot(cwd, signal);
   const headSha = await getHeadSha(repoRoot, signal);
 
@@ -1656,8 +1656,8 @@ export async function runExperimentLanesSingleCall(
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
 
   const keepDebugPanes = process.env.PI_AB_KEEP_PANES === "1";
-  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? experiment.debug_ui ?? "none").toLowerCase();
-  const useCmuxDebug = experiment.debug === true && debugUiMode !== "none" && isCmuxAvailable();
+  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? debugUiOf(experiment) ?? "none").toLowerCase();
+  const useCmuxDebug = debugEnabledOf(experiment) && debugUiMode !== "none" && isCmuxAvailable();
 
   const laneSurfaces: Array<string | undefined> = [];
   if (useCmuxDebug) {
@@ -1780,7 +1780,7 @@ export async function runExperimentLanesSingleCall(
         "--no-themes",
       ];
 
-      if (process.env.PI_AB_DEBUG_JSON === "1" && experiment.debug === true && laneSurfaces[laneIndex]) {
+      if (process.env.PI_AB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
         piArgs.push("--mode", "json");
       }
 
@@ -1803,7 +1803,7 @@ export async function runExperimentLanesSingleCall(
       const parsed = parseSingleCallLaneSession(sessionPath, targetTool);
       const patch = await createWorktreePatch(worktreePath, laneDir);
 
-      if (!experiment.debug) {
+      if (!debugEnabledOf(experiment)) {
         await removeWorktree(repoRoot, worktreePath);
       }
 
@@ -1849,7 +1849,7 @@ export async function runExperimentLanesSingleCall(
         lane_harness_used: "pi_prompt",
       };
     } catch (err: any) {
-      if (!experiment.debug) {
+      if (!debugEnabledOf(experiment)) {
         try {
           await removeWorktree(repoRoot, worktreePath);
         } catch {}
@@ -1929,7 +1929,7 @@ export async function runExperimentLanesMultiCall(
   onProgress?: (snapshot: LaneProgressSnapshot) => void,
 ): Promise<LaneRunRecord[]> {
   const experiment = loaded.experiment;
-  const timeoutMs = experiment.timeout_ms ?? 15000;
+  const timeoutMs = timeoutMsOf(experiment);
   const repoRoot = await getRepoRoot(cwd, signal);
   const headSha = await getHeadSha(repoRoot, signal);
 
@@ -1938,8 +1938,8 @@ export async function runExperimentLanesMultiCall(
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
 
   const keepDebugPanes = process.env.PI_AB_KEEP_PANES === "1";
-  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? experiment.debug_ui ?? "none").toLowerCase();
-  const useCmuxDebug = experiment.debug === true && debugUiMode !== "none" && isCmuxAvailable();
+  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? debugUiOf(experiment) ?? "none").toLowerCase();
+  const useCmuxDebug = debugEnabledOf(experiment) && debugUiMode !== "none" && isCmuxAvailable();
 
   const laneSurfaces: Array<string | undefined> = [];
   if (useCmuxDebug) {
@@ -2036,7 +2036,7 @@ export async function runExperimentLanesMultiCall(
         "--no-themes",
       ];
 
-      if (process.env.PI_AB_DEBUG_JSON === "1" && experiment.debug === true && laneSurfaces[laneIndex]) {
+      if (process.env.PI_AB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
         piArgs.push("--mode", "json");
       }
 
@@ -2058,7 +2058,7 @@ export async function runExperimentLanesMultiCall(
       const sessionPath = newestSessionFile(sessionDir);
       const parsed = parseMultiCallLaneSession(sessionPath);
 
-      if (!experiment.debug) {
+      if (!debugEnabledOf(experiment)) {
         await removeWorktree(repoRoot, worktreePath);
       }
 
@@ -2100,7 +2100,7 @@ export async function runExperimentLanesMultiCall(
         lane_harness_used: "pi_prompt",
       };
     } catch (err: any) {
-      if (!experiment.debug) {
+      if (!debugEnabledOf(experiment)) {
         try {
           await removeWorktree(repoRoot, worktreePath);
         } catch {}

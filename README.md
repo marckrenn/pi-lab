@@ -1,37 +1,37 @@
 # pi-ab-wip
 
-Work-in-progress **pi A/B conductor extension** for running multiple lane variants behind one tool name, comparing them safely, and returning one chosen result to the user.
+pi A/B conductor extension for running multiple lane variants behind one tool name, comparing them safely, and returning one selected result.
 
-Use it when you want to:
-- compare multiple tool implementations behind the same interface
-- benchmark prompt or extension variants safely in isolated worktrees
-- let metrics, an LLM grader, or both decide which lane should win
-- keep a safe primary lane while still collecting telemetry from alternatives
+It is useful when you want to:
+- compare multiple implementations of the same tool
+- benchmark prompt or extension variants in isolation
+- let a formula, an LLM, or both choose the winning lane
+- keep a safe fallback lane while still collecting telemetry from alternatives
 
 ## When to use this
 
-Use this extension when you need at least one of these:
-- **safe comparison** of multiple lane implementations
-- **deterministic winner selection** from measurable metrics
-- **LLM-based winner selection** for semantic quality
-- **full run artifacts** for debugging, benchmarking, and regression analysis
+Use it when you need at least one of these:
+- safe side-by-side tool comparison
+- formula-based winner selection from measurable metrics
+- LLM-based winner selection for semantic quality
+- reproducible run artifacts for debugging and regression analysis
 
 ## When not to use this
 
 This is probably overkill if:
 - you only have one stable implementation
 - you do not need per-lane telemetry or artifacts
-- the latency/cost of running multiple lanes is unacceptable
-- your workflow has side effects that cannot be isolated well in worktrees
+- multi-lane latency/cost is unacceptable
+- your workflow cannot be isolated safely in worktrees
 
 ## What it does
 
-- [Stage 1: Intercept](#stage-1-intercept) — decides whether an incoming tool call should turn into an experiment run.
-- [Stage 2: Fork lanes](#stage-2-fork-lanes) — creates isolated lane workspaces so each candidate runs independently.
-- [Stage 3: Execute strategy](#stage-3-execute-strategy) — runs lanes using the strategy that matches your tool shape and task style.
-- [Stage 4: Score and select winner](#stage-4-score-and-select-winner) — chooses which lane counts, using metrics, LLM grading, or a combination.
-- [Stage 5: Apply result](#stage-5-apply-result) — merges the winner back into the main workspace when the tool produces a patch/output.
-- [Stage 6: Persist telemetry](#stage-6-persist-telemetry) — writes run, lane, grading, and fallback artifacts for inspection later.
+- [Stage 1: Intercept](#stage-1-intercept) — decides whether an incoming tool call should become an experiment run.
+- [Stage 2: Fork lanes](#stage-2-fork-lanes) — creates isolated workspaces so each lane runs independently.
+- [Stage 3: Execute strategy](#stage-3-execute-strategy) — runs lanes using the execution style that fits the tool/task shape.
+- [Stage 4: Choose winner](#stage-4-choose-winner) — picks the winner using a hardcoded lane, a formula, an LLM, or a blend.
+- [Stage 5: Apply result](#stage-5-apply-result) — merges the winning patch/output back when applicable.
+- [Stage 6: Persist telemetry](#stage-6-persist-telemetry) — writes run, lane, LLM, and fallback artifacts for later inspection.
 
 ## Quick start
 
@@ -45,31 +45,29 @@ Inside pi:
 ```text
 /ab wizard                     # create a new experiment config interactively
 /ab status                     # show loaded experiments and where they came from
-/ab validate                   # show config warnings/errors before you run anything
+/ab validate                   # show config errors/warnings before you run anything
 /ab gc --keep-last 10          # preview which old runs would be removed
 /ab gc --keep-last 10 --force  # actually delete the matching old runs
 ```
 
 ### Wizard flow
 
-`/ab wizard` now asks in user-facing order:
+`/ab wizard` asks in user-facing order:
 1. scope + experiment id
 2. target tool
 3. execution strategy
 4. trigger gates
 5. timeout
-6. winner mode
-7. grading options (only when needed)
-8. lane paths + primary lane
+6. how the winner should be chosen
+7. LLM options (only when needed)
+8. lane paths + baseline lane + hardcoded winner lane (if needed)
 
 ---
 
 ## Stage 1: Intercept
 
-The extension watches for calls to `target_tool`.
-
-An experiment matches when:
-- the called tool name equals `target_tool`
+An experiment is eligible when:
+- the called tool name matches `tool.name`
 - optional trigger gates pass
 
 ### Trigger gates
@@ -77,11 +75,11 @@ An experiment matches when:
 | Field | Meaning |
 |---|---|
 | `sample_rate` | Probability gate (0..1) for whether the experiment should run |
-| `when_path_regex` | Optional path filter, mainly useful when the intercepted args include `path` |
-| `when_oldtext_min_chars` | Optional minimum `oldText` length gate for edit-like flows |
+| `when_path_regex` | Optional path filter, mainly useful when intercepted args include `path` |
+| `when_oldtext_min_chars` | Optional minimum `oldText` size gate for edit-like flows |
 | `cooldown_ms` | Minimum delay between runs of the same experiment |
 
-If no valid experiment matches, the tool call proceeds normally.
+If you omit `trigger`, the experiment is eligible for every call to `tool.name`.
 
 ## Stage 2: Fork lanes
 
@@ -98,7 +96,7 @@ That gives you:
 
 | If your situation is... | Use |
 |---|---|
-| All lanes expose the same tool shape and can accept the same args | `fixed_args` |
+| All lanes expose the same tool shape and accept the same args | `fixed_args` |
 | Lanes should each make exactly one target-tool call | `lane_single_call` |
 | Lanes may need lane-specific replanning or tool chaining | `lane_multi_call` |
 
@@ -110,26 +108,9 @@ That gives you:
 | `lane_single_call` | `{ task, context?, constraints? }` | `pi_prompt` | Exactly one target-tool call + `LANE_DONE` | One-call discipline with lane-specific argument schemas |
 | `lane_multi_call` | `{ task, context?, constraints? }` | `pi_prompt` | Multi-step lane flow + strict final JSON | Lane-level replanning/tool chaining |
 
-### One example per strategy
-
-**`fixed_args`**
-- User/tool call: `edit({ path, oldText, newText })`
-- All lanes receive the same args.
-- Best for comparing multiple implementations of the same tool contract.
-
-**`lane_single_call`**
-- User/tool call: `{ task, context?, constraints? }`
-- Each lane must produce exactly one target-tool call.
-- Best for strict one-step flows.
-
-**`lane_multi_call`**
-- User/tool call: `{ task, context?, constraints? }`
-- Lanes may replan and use different internal APIs before returning final JSON.
-- Best for more open-ended flows.
-
 ### What the system infers
 
-The system infers lane harness from `execution_strategy`:
+The system infers lane harness from `execution.strategy`:
 - `fixed_args` → `direct`
 - `lane_single_call` / `lane_multi_call` → `pi_prompt`
 
@@ -139,61 +120,60 @@ Advanced override remains available via:
 PI_AB_LANE_HARNESS=direct|pi_prompt
 ```
 
-## Stage 4: Score and select winner
+## Stage 4: Choose winner
 
 ### Who decides the winner?
 
-| `winner_mode` | Who decides? | Inputs used | Typical use |
+| `winner.mode` | Who decides? | Inputs used | Typical use |
 |---|---|---|---|
-| `shadow` | Primary lane config | None | Safe rollout where one lane must always merge back |
-| `deterministic` | Formula engine | Metrics | Cheap, explainable selection |
-| `grading` | LLM grader | Lane outputs + optional transcripts/artifacts | Semantic quality selection |
-| `hybrid` | Formula engine + LLM grader | Metrics + LLM scores | Balance speed/cost and semantic quality |
+| `hardcoded` | Explicit configured lane | None | Safe rollout where one lane must always win |
+| `formula` | Formula engine | Metrics | Cheap, explainable winner selection |
+| `llm` | LLM judge | Lane outputs + optional tool-call context | Semantic quality selection |
+| `blend` | Formula engine + LLM judge | Metrics + LLM scores | Balance objective metrics and semantic quality |
 
-### Winner selection modes
+### Winner modes
 
-#### `shadow`
-- The **primary lane always wins** mergeback.
-- Other lanes may still run and produce telemetry.
-- Use this when you want observability without changing the applied result.
+#### `hardcoded`
+A configured lane always wins.
 
-#### `deterministic`
-- Winner is chosen from `selection.deterministic.objective` and `tie_breakers`.
-- Use this when measurable metrics are enough.
+Use this when you want observability from other lanes, but mergeback must always come from one specific lane.
 
-#### `grading`
-- Winner is chosen by the LLM grader.
-- Use this when semantic correctness or output quality matters more than raw metrics.
+#### `formula`
+The winner is chosen from `winner.formula.objective` and optional `tie_breakers`.
 
-#### `hybrid`
-- Deterministic ranking provides the baseline.
-- LLM grading is then used either:
-  - only to break deterministic ties (`llm_tiebreaker`), or
-  - as an additional score (`llm_score`)
+Use this when measurable metrics are enough.
 
-### Why `selection.deterministic` and `selection.hybrid` are separate
+#### `llm`
+The winner is chosen by the LLM judge.
 
-They control different layers of winner selection:
-- `selection.deterministic` defines the baseline ranking model
-- `selection.hybrid` defines how LLM grading is added on top of that baseline
+Use this when semantic correctness or output quality matters more than raw metrics.
 
-This lets one deterministic model serve three roles:
-- standalone deterministic winner selection
-- fallback ranking when grading fails
-- baseline ranking for hybrid selection
+#### `blend`
+Formula ranking provides the baseline, and the LLM is used either:
+- only to break formula ties (`llm_tiebreaker`), or
+- as an additional score (`llm_score`)
 
-### Grading fallback policy
+Use this when you want both objective metrics and semantic judgment.
 
-Grading can fail because of:
+### Baseline lane vs hardcoded winner lane
+
+These are different concepts:
+
+- **baseline lane**: safe fallback lane used when the chosen winner cannot be used or all lanes fail
+- **hardcoded winner lane**: the lane that always wins when `winner.mode = "hardcoded"`
+
+### LLM failure policy
+
+LLM judging can fail because of:
 - timeout
 - non-zero grader exit
 - invalid JSON output
 - invalid output schema
-- grader choosing no usable winner
+- no usable winner
 
-When that happens, `failure_policy.on_grading_failure` controls what happens next:
-- `fallback_deterministic_then_shadow`
-- `fallback_shadow`
+When that happens, `failure_policy.on_llm_failure` controls what happens next:
+- `fallback_formula_then_baseline`
+- `fallback_baseline`
 
 ## Stage 5: Apply result
 
@@ -202,7 +182,7 @@ For patch-producing tools like `edit`, the selected lane result is applied back 
 Apply flow:
 1. try normal patch apply
 2. if needed, try `--3way` fallback
-3. if configured, fall back to primary apply behavior on winner-apply failure
+3. if configured, fall back to the baseline lane on winner-apply failure
 
 ## Stage 6: Persist telemetry
 
@@ -224,163 +204,175 @@ Common files:
 
 ## Config mental model
 
-Think of the config in five blocks:
+Think of the config in six blocks:
 
-1. **Identity** — what this experiment is called and which tool it intercepts
-2. **Trigger** — when the experiment should run
-3. **Execution** — how lanes are executed
-4. **Winner selection** — how the winner is decided
-5. **Operations** — lanes, failure policy, grading, debug
+1. **Identity** — what this experiment is called
+2. **Tool** — which tool is intercepted
+3. **Trigger** — when the experiment is eligible to run
+4. **Execution** — how lanes run
+5. **Winner** — how the winner is chosen
+6. **Operations** — lanes, failure policy, debug
 
 ## You configure vs the system infers
 
 ### You configure
-- `target_tool`
-- `trigger` gates
-- `execution_strategy`
-- `winner_mode`
+- `tool.name`
+- optional `trigger`
+- `execution.strategy`
+- `winner.mode`
 - `lanes`
-- optional `selection`, `grading`, `failure_policy`, `debug_ui`
+- optional `winner.formula`, `winner.llm`, `winner.blend`, `failure_policy`, `debug`
 
 ### The system infers
+- lane ids when omitted
 - lane harness from strategy
 - whether path-gating is applicable
-- which artifacts are created based on execution path
+- which artifacts are produced from the execution path
 
 ---
 
-## Config examples
-
-### Minimal valid config
+## Smallest valid config
 
 ```json
 {
   "id": "example",
   "enabled": true,
-  "target_tool": "edit",
-  "trigger": {},
-  "execution_strategy": "fixed_args",
-  "winner_mode": "deterministic",
+  "tool": { "name": "edit" },
+  "winner": { "mode": "formula" },
   "lanes": [
-    { "id": "A", "primary": true, "extensions": ["./a.ts"] },
-    { "id": "B", "extensions": ["./b.ts"] }
+    { "extensions": ["./a.ts"] },
+    { "extensions": ["./b.ts"] }
   ]
 }
 ```
 
-### Deterministic example
+Notes:
+- omitting `trigger` means “eligible for every call to `tool.name`”
+- omitting `execution` defaults to `fixed_args`
+- omitting `winner.formula.objective` defaults to `min(latency_ms)`
+- if no lane is marked `baseline`, the first lane becomes baseline automatically
+
+---
+
+## Config examples
+
+### Hardcoded winner
 
 ```jsonc
 {
-  "id": "edit-deterministic",
+  "id": "safe-rollout",
   "enabled": true,
-  "target_tool": "edit",
-  "trigger": {
-    "sample_rate": 1,
-    "when_path_regex": "^fixtures/ab-test/"
+  "tool": { "name": "edit" },
+  "execution": { "strategy": "fixed_args" },
+  "winner": {
+    "mode": "hardcoded",
+    "hardcoded_lane": "baseline"
   },
-  "execution_strategy": "fixed_args",
-  "timeout_ms": 15000,
-  "winner_mode": "deterministic",
-  "selection": {
-    "deterministic": {
-      "objective": "min({latency_ms} + {error} * 100000 + {timeout} * 100000)",
-      "tie_breakers": ["max(success)", "min(total_tokens)"]
+  "lanes": [
+    { "label": "baseline", "baseline": true, "extensions": ["./lanes/a.ts"] },
+    { "label": "experiment", "extensions": ["./lanes/b.ts"] }
+  ]
+}
+```
+
+### Formula winner
+
+```jsonc
+{
+  "id": "fastest-edit",
+  "enabled": true,
+  "tool": { "name": "edit" },
+  "execution": { "strategy": "fixed_args", "timeout_ms": 15000 },
+  "winner": {
+    "mode": "formula",
+    "formula": {
+      "objective": "min(latency_ms)",
+      "tie_breakers": ["max(success)"]
     }
   },
   "lanes": [
-    { "id": "A", "primary": true, "extensions": ["./fixtures/ab-test/lanes/edit-perm-a.ts"] },
-    { "id": "B", "extensions": ["./fixtures/ab-test/lanes/edit-perm-b.ts"] },
-    { "id": "C", "extensions": ["./fixtures/ab-test/lanes/edit-perm-c.ts"] }
+    { "label": "baseline", "baseline": true, "extensions": ["./lanes/a.ts"] },
+    { "label": "faster", "extensions": ["./lanes/b.ts"] }
   ]
 }
 ```
 
-### Grading example (LLM-only winner selection)
+### LLM winner
 
 ```jsonc
 {
-  "id": "edit-grading",
+  "id": "best-semantic-result",
   "enabled": true,
-  "target_tool": "edit",
-  "trigger": { "sample_rate": 1 },
-  "execution_strategy": "fixed_args",
-  "winner_mode": "grading",
-  "grading": {
-    "execution": "process",
-    "timeout_ms": 12000,
-    "prompt_file": "./.pi/ab/prompts/grade-default.md",
-    "include": { "tool_calls": true }
+  "tool": { "name": "edit" },
+  "execution": { "strategy": "fixed_args" },
+  "winner": {
+    "mode": "llm",
+    "llm": {
+      "prompt_file": "./.pi/ab/prompts/grade-default.md",
+      "include_tool_calls": true
+    }
   },
   "lanes": [
-    { "id": "A", "primary": true, "extensions": ["./a.ts"] },
-    { "id": "B", "extensions": ["./b.ts"] }
+    { "label": "baseline", "baseline": true, "extensions": ["./lanes/a.ts"] },
+    { "label": "safer", "extensions": ["./lanes/b.ts"] }
   ]
 }
 ```
 
-### Hybrid example
+### Blend winner
 
 ```jsonc
 {
-  "id": "edit-hybrid",
+  "id": "fast-and-good",
   "enabled": true,
-  "target_tool": "edit",
-  "trigger": { "sample_rate": 1 },
-  "execution_strategy": "fixed_args",
-  "winner_mode": "hybrid",
-  "selection": {
-    "deterministic": {
-      "objective": "min({latency_ms} + {error} * 100000 + {timeout} * 100000)",
+  "tool": { "name": "edit" },
+  "execution": { "strategy": "fixed_args" },
+  "winner": {
+    "mode": "blend",
+    "formula": {
+      "objective": "min(latency_ms)",
       "tie_breakers": ["max(success)"]
     },
-    "hybrid": {
+    "llm": {
+      "prompt_file": "./.pi/ab/prompts/grade-default.md"
+    },
+    "blend": {
       "mode": "llm_score",
-      "deterministic_weight": 0.7,
-      "llm_weight": 0.3,
-      "final_objective": "max({deterministic_score} * 0.7 + {llm_score} * 0.3)",
-      "final_tie_breakers": ["max(llm_score)"]
+      "formula_weight": 0.7,
+      "llm_weight": 0.3
     }
   },
-  "grading": {
-    "execution": "process",
-    "prompt_file": "./.pi/ab/prompts/grade-default.md"
-  },
   "lanes": [
-    { "id": "A", "primary": true, "extensions": ["./a.ts"] },
-    { "id": "B", "extensions": ["./b.ts"] }
+    { "label": "baseline", "baseline": true, "extensions": ["./lanes/a.ts"] },
+    { "label": "better", "extensions": ["./lanes/b.ts"] }
   ]
 }
 ```
 
-### Shadow example
+### Inline LLM prompt
 
 ```jsonc
 {
-  "id": "edit-shadow",
-  "enabled": true,
-  "target_tool": "edit",
-  "trigger": { "sample_rate": 1 },
-  "execution_strategy": "fixed_args",
-  "winner_mode": "shadow",
-  "lanes": [
-    { "id": "A", "primary": true, "extensions": ["./a.ts"] },
-    { "id": "B", "extensions": ["./b.ts"] },
-    { "id": "C", "extensions": ["./c.ts"] }
-  ]
+  "winner": {
+    "mode": "llm",
+    "llm": {
+      "prompt": "Prefer correctness first, then safety, then efficiency."
+    }
+  }
 }
 ```
 
-### Grouped-by-intent annotated JSONC
+### Grouped-by-intent example
 
 ```jsonc
 {
-  // Identity
   "id": "edit-lanes-v1",
   "enabled": true,
-  "target_tool": "edit",
 
-  // Trigger gates
+  "tool": {
+    "name": "edit"
+  },
+
   "trigger": {
     "sample_rate": 1,
     "when_path_regex": "^fixtures/ab-test/",
@@ -388,65 +380,49 @@ Think of the config in five blocks:
     "cooldown_ms": 0
   },
 
-  // Execution
-  "execution_strategy": "fixed_args",
-  "timeout_ms": 15000,
+  "execution": {
+    "strategy": "fixed_args",
+    "timeout_ms": 15000
+  },
 
-  // Winner selection
-  "winner_mode": "deterministic",
-  "selection": {
-    "deterministic": {
+  "winner": {
+    "mode": "formula",
+    "formula": {
       "objective": "min({latency_ms} + {error} * 100000 + {timeout} * 100000)",
       "tie_breakers": ["max(success)", "min(total_tokens)"]
-    },
-    "hybrid": {
-      "mode": "llm_score",
-      "deterministic_weight": 0.7,
-      "llm_weight": 0.3,
-      "final_objective": "max({deterministic_score} * 0.7 + {llm_score} * 0.3)",
-      "final_tie_breakers": ["max(llm_score)"]
     }
   },
 
-  // Grading
-  "grading": {
-    "execution": "process",
-    "timeout_ms": 12000,
-    "prompt_file": "./.pi/ab/prompts/grade-default.md",
-    "include": { "tool_calls": true }
-  },
-
-  // Lanes
   "lanes": [
-    { "id": "A", "primary": false, "extensions": ["./fixtures/ab-test/lanes/edit-perm-a.ts"] },
-    { "id": "B", "primary": true,  "extensions": ["./fixtures/ab-test/lanes/edit-perm-b.ts"] },
-    { "id": "C", "primary": false, "extensions": ["./fixtures/ab-test/lanes/edit-perm-c.ts"] }
+    { "label": "A", "extensions": ["./fixtures/ab-test/lanes/edit-perm-a.ts"] },
+    { "label": "B", "baseline": true, "extensions": ["./fixtures/ab-test/lanes/edit-perm-b.ts"] },
+    { "label": "C", "extensions": ["./fixtures/ab-test/lanes/edit-perm-c.ts"] }
   ],
 
-  // Failure policy
   "failure_policy": {
     "on_lane_timeout": "exclude_continue",
     "on_lane_crash": "exclude_continue",
-    "on_grading_failure": "fallback_deterministic_then_shadow",
-    "on_winner_apply_failure": "fallback_primary_then_fail",
-    "all_lanes_failed": "fallback_primary"
+    "on_llm_failure": "fallback_formula_then_baseline",
+    "on_winner_apply_failure": "fallback_baseline_then_fail",
+    "all_lanes_failed": "fallback_baseline"
   },
 
-  // Debug
-  "debug": false,
-  "debug_ui": "none"
+  "debug": {
+    "enabled": false,
+    "ui": "none"
+  }
 }
 ```
 
 ## Recommended defaults
 
 If you are starting from scratch:
-- start with `execution_strategy: "fixed_args"`
-- start with `winner_mode: "deterministic"`
-- keep one clear primary lane
+- start with `execution.strategy: "fixed_args"`
+- start with `winner.mode: "formula"`
+- keep one clear baseline lane
 - use `sample_rate: 1` while developing
-- turn on `grading` only when semantic quality really matters
-- use `hybrid` only after deterministic metrics are already meaningful
+- turn on `winner.mode: "llm"` only when semantic quality really matters
+- use `winner.mode: "blend"` only after formula metrics are already useful
 
 ## Key `run.json` fields
 
@@ -457,16 +433,16 @@ If you are starting from scratch:
 | `winner_lane_id` | Which lane won |
 | `selection_source` | Where the decision came from |
 | `fallback_reason_code` | Why a fallback happened |
-| `grading_error_code` | Why grading failed, if it failed |
+| `llm_error_code` | Why LLM judging failed, if it failed |
 | `execution_strategy` | Which runtime lane protocol was used |
 | `lane_harness` | Which harness actually ran |
 
 ## First 5 things to inspect when a run behaves weirdly
 
-1. `run.json` — winner, fallback, and top-level decision path
+1. `run.json` — winner decision, fallback, and top-level path
 2. `lanes/{id}.json` — per-lane status, latency, protocol errors, patch info
-3. `artifacts/grading-output.json` — what the grader actually returned
-4. `artifacts/grading-raw-output-*.md` — raw grader stdout/stderr when grading failed
+3. `artifacts/grading-output.json` — what the LLM judge returned
+4. `artifacts/grading-raw-output-*.md` — raw grader stdout/stderr when LLM judging failed
 5. `sessions/...` — lane transcripts for prompt-based strategies
 
 ## Validation
@@ -474,18 +450,19 @@ If you are starting from scratch:
 `/ab validate` reports configuration warnings/errors.
 
 Examples:
-- unsupported `execution_strategy`
-- missing `target_tool` or `winner_mode`
-- legacy keys such as `trigger.tool`, `mode`, or `lane_harness`
-- `when_path_regex` caveat for proxy strategies
+- unsupported `execution.strategy`
+- missing `tool.name` or `winner.mode`
+- invalid `winner.hardcoded_lane`
+- `trigger.when_path_regex` caveat for proxy strategies
+- invalid combinations like both `winner.llm.prompt` and `winner.llm.prompt_file`
 
 Invalid experiments are skipped at runtime.
 
 ## Debug controls
 
 Config:
-- `"debug": true|false`
-- `"debug_ui": "none" | "cmux"`
+- `debug.enabled`
+- `debug.ui: "none" | "cmux"`
 
 Env overrides:
 
@@ -499,11 +476,11 @@ PI_AB_LANE_HARNESS=direct|pi_prompt
 ## Project files
 
 - `pi-extension/ab/index.ts` — interception wiring and command registration
-- `pi-extension/ab/config.ts` — experiment loading, validation, matching
+- `pi-extension/ab/config.ts` — experiment loading, normalization, validation, matching
 - `pi-extension/ab/runner.ts` — lane execution/worktree handling
-- `pi-extension/ab/selection.ts` — deterministic scoring/ranking
-- `pi-extension/ab/winner.ts` — winner mode logic
-- `pi-extension/ab/grading.ts` — grader process orchestration
+- `pi-extension/ab/selection.ts` — formula scoring/ranking
+- `pi-extension/ab/winner.ts` — winner logic
+- `pi-extension/ab/grading.ts` — LLM judge process orchestration
 - `pi-extension/ab/wizard.ts` — setup wizard
 - `pi-extension/ab/gc.ts` — retention and cleanup
 

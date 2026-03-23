@@ -1,4 +1,5 @@
 import type { AbExperiment, LaneRunRecord } from "./types.ts";
+import { formulaConfigOf, getBaselineLaneId } from "./config.ts";
 
 type Direction = "min" | "max";
 
@@ -92,11 +93,9 @@ function compareBy(a: LaneRunRecord, b: LaneRunRecord, expr: ScoreExpr, extraMet
   return av > bv ? -1 : 1;
 }
 
-export function getPrimaryLaneId(experiment: AbExperiment): string {
-  return experiment.lanes.find((l) => l.primary)?.id ?? experiment.lanes[0]?.id ?? "";
-}
+export { getBaselineLaneId };
 
-export interface DeterministicRanking {
+export interface FormulaRanking {
   candidates: LaneRunRecord[];
   sorted: LaneRunRecord[];
   reason: string;
@@ -104,16 +103,17 @@ export interface DeterministicRanking {
   compareWithoutIdFallback: (a: LaneRunRecord, b: LaneRunRecord) => number;
 }
 
-export function rankDeterministicLanes(
+export function rankFormulaLanes(
   experiment: AbExperiment,
   lanes: LaneRunRecord[],
   extraMetricsByLane?: ExtraMetricsByLane,
-): DeterministicRanking {
+): FormulaRanking {
   const successLanes = lanes.filter((l) => l.status === "success");
   const candidates = successLanes.length > 0 ? successLanes : lanes;
 
-  const objective = parseExpr(experiment.selection?.deterministic?.objective ?? "min(latency_ms)");
-  const tiebreakers = (experiment.selection?.deterministic?.tie_breakers ?? [])
+  const formula = formulaConfigOf(experiment);
+  const objective = parseExpr(formula.objective ?? "min(latency_ms)");
+  const tiebreakers = (formula.tie_breakers ?? [])
     .map((s) => parseExpr(s))
     .filter((x): x is ScoreExpr => !!x);
 
@@ -140,12 +140,12 @@ export function rankDeterministicLanes(
   const sorted = [...candidates].sort(compare);
   const reason = objective
     ? `${objective.direction}(${objective.body})${tiebreakers.length ? " with tie-breakers" : ""}`
-    : "deterministic default order";
+    : "formula default order";
 
   return { candidates, sorted, reason, compare, compareWithoutIdFallback };
 }
 
-export function chooseDeterministicLane(
+export function chooseFormulaLane(
   experiment: AbExperiment,
   lanes: LaneRunRecord[],
 ): { laneId: string | null; reason: string } {
@@ -153,10 +153,10 @@ export function chooseDeterministicLane(
     return { laneId: null, reason: "no lanes" };
   }
 
-  const ranking = rankDeterministicLanes(experiment, lanes);
+  const ranking = rankFormulaLanes(experiment, lanes);
   const winner = ranking.sorted[0];
   if (!winner) {
-    return { laneId: null, reason: "no deterministic winner" };
+    return { laneId: null, reason: "no formula winner" };
   }
 
   return { laneId: winner.lane_id, reason: ranking.reason };

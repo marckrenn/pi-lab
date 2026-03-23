@@ -1,4 +1,4 @@
-export type AbMode = "shadow" | "deterministic" | "grading" | "hybrid";
+export type WinnerMode = "hardcoded" | "formula" | "llm" | "blend";
 export type ExecutionStrategy = "fixed_args" | "lane_single_call" | "lane_multi_call";
 
 export interface TriggerPolicy {
@@ -11,61 +11,72 @@ export interface TriggerPolicy {
 export interface FailurePolicy {
   on_lane_timeout?: "exclude_continue" | "abort_all";
   on_lane_crash?: "exclude_continue" | "abort_all";
-  on_grading_failure?: "fallback_deterministic_then_shadow" | "fallback_shadow";
-  on_winner_apply_failure?: "fallback_primary_then_fail" | "fail";
-  all_lanes_failed?: "fail_tool_call" | "fallback_primary";
+  on_llm_failure?: "fallback_formula_then_baseline" | "fallback_baseline";
+  on_winner_apply_failure?: "fallback_baseline_then_fail" | "fail";
+  all_lanes_failed?: "fail_tool_call" | "fallback_baseline";
 }
 
 export interface LaneConfig {
   id: string;
-  primary?: boolean;
+  label?: string;
+  baseline?: boolean;
   extensions: string[];
 }
 
-export interface DeterministicSelection {
-  objective: string;
+export interface FormulaWinnerConfig {
+  objective?: string;
   tie_breakers?: string[];
 }
 
-export interface GradingConfig {
+export interface LlmWinnerConfig {
   execution?: "process" | "inline";
   model?: string;
   timeout_ms?: number;
+  prompt?: string;
   prompt_file?: string;
-  include?: {
-    outputs?: boolean;
-    metrics?: boolean;
-    patches?: boolean;
-    tool_calls?: boolean;
-  };
+  include_tool_calls?: boolean;
 }
 
-export interface HybridSelection {
+export interface BlendWinnerConfig {
   mode?: "llm_tiebreaker" | "llm_score";
-  deterministic_weight?: number;
+  formula_weight?: number;
   llm_weight?: number;
-  final_objective?: string;
-  final_tie_breakers?: string[];
+  objective?: string;
+  tie_breakers?: string[];
+}
+
+export interface WinnerConfig {
+  mode: WinnerMode;
+  hardcoded_lane?: string;
+  formula?: FormulaWinnerConfig;
+  llm?: LlmWinnerConfig;
+  blend?: BlendWinnerConfig;
+}
+
+export interface ToolConfig {
+  name: string;
+}
+
+export interface ExecutionConfig {
+  strategy?: ExecutionStrategy;
+  timeout_ms?: number;
+}
+
+export interface DebugConfig {
+  enabled?: boolean;
+  ui?: "cmux" | "none";
 }
 
 export interface AbExperiment {
   id: string;
   enabled?: boolean;
-  target_tool: string;
-  trigger: TriggerPolicy;
-  winner_mode: AbMode;
-  execution_strategy?: ExecutionStrategy;
+  tool: ToolConfig;
+  trigger?: TriggerPolicy;
+  execution?: ExecutionConfig;
+  winner: WinnerConfig;
   lanes: LaneConfig[];
-  timeout_ms?: number;
-  debug?: boolean;
-  debug_ui?: "cmux" | "none";
-  selection?: {
-    deterministic?: DeterministicSelection;
-    grading?: GradingConfig;
-    hybrid?: HybridSelection;
-  };
-  grading?: GradingConfig;
   failure_policy?: FailurePolicy;
+  debug?: DebugConfig;
 }
 
 export interface LoadedExperiment {
@@ -97,10 +108,10 @@ export interface LaneRunRecord {
 
 export interface WinnerSelection {
   winner_lane_id: string;
-  mode_used: AbMode | "grading-fallback-deterministic" | "grading-fallback-shadow";
+  mode_used: WinnerMode | "llm-fallback-formula" | "llm-fallback-baseline";
   reason: string;
   selection_source?: string;
   fallback_reason_code?: string;
-  grading_error?: string;
-  grading_error_code?: string;
+  llm_error?: string;
+  llm_error_code?: string;
 }

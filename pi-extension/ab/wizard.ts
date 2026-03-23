@@ -46,34 +46,15 @@ export async function runAbWizard(
   if (timeoutRaw == null) return { cancelled: true };
   const timeoutMs = Math.max(1, Number(timeoutRaw));
 
-  const winnerModeChoice = await ctx.ui.select("Winner selection mode", ["deterministic", "shadow", "grading", "hybrid"]);
+  const winnerModeChoice = await ctx.ui.select("How should the winner be chosen?", ["hardcoded", "formula", "llm", "blend"]);
   if (!winnerModeChoice) return { cancelled: true };
 
-  let includeToolCallsInGrading = false;
-  let hybridModeChoice: "llm_tiebreaker" | "llm_score" = "llm_tiebreaker";
-  let hybridDetWeight = 1;
-  let hybridLlmWeight = 1;
-
-  if (winnerModeChoice === "grading" || winnerModeChoice === "hybrid") {
-    const includeToolCallsChoice = await ctx.ui.select("Include lane tool-call transcripts in grading input?", ["no", "yes"]);
-    if (!includeToolCallsChoice) return { cancelled: true };
-    includeToolCallsInGrading = includeToolCallsChoice === "yes";
-  }
-
-  if (winnerModeChoice === "hybrid") {
-    const hm = await ctx.ui.select("Hybrid mode", ["llm_tiebreaker", "llm_score"]);
-    if (!hm) return { cancelled: true };
-    hybridModeChoice = hm as "llm_tiebreaker" | "llm_score";
-
-    if (hybridModeChoice === "llm_score") {
-      const detRaw = await ctx.ui.input("Hybrid deterministic weight", "1.0");
-      if (detRaw == null) return { cancelled: true };
-      const llmRaw = await ctx.ui.input("Hybrid LLM weight", "1.0");
-      if (llmRaw == null) return { cancelled: true };
-      hybridDetWeight = Number.isFinite(Number(detRaw)) ? Number(detRaw) : 1;
-      hybridLlmWeight = Number.isFinite(Number(llmRaw)) ? Number(llmRaw) : 1;
-    }
-  }
+  let llmPromptMode: "file" | "inline" = "file";
+  let llmPromptInline = "";
+  let includeToolCalls = false;
+  let blendMode: "llm_tiebreaker" | "llm_score" = "llm_tiebreaker";
+  let formulaWeight = 1;
+  let llmWeight = 1;
 
   const laneA = (await ctx.ui.input("Lane A extension path", "./fixtures/ab-test/lanes/edit-perm-a.ts"))?.trim();
   if (!laneA) return { cancelled: true };
@@ -82,8 +63,44 @@ export async function runAbWizard(
   const laneC = (await ctx.ui.input("Lane C extension path", "./fixtures/ab-test/lanes/edit-perm-c.ts"))?.trim();
   if (!laneC) return { cancelled: true };
 
-  const primaryLaneChoice = await ctx.ui.select("Primary lane (safe default / shadow winner)", ["A", "B", "C"]);
-  if (!primaryLaneChoice) return { cancelled: true };
+  const baselineLaneChoice = await ctx.ui.select("Baseline lane (fallback lane)", ["A", "B", "C"]);
+  if (!baselineLaneChoice) return { cancelled: true };
+
+  let hardcodedWinnerLane: "A" | "B" | "C" | undefined;
+  if (winnerModeChoice === "hardcoded") {
+    const choice = await ctx.ui.select("Which lane should always win?", ["A", "B", "C"]);
+    if (!choice) return { cancelled: true };
+    hardcodedWinnerLane = choice as "A" | "B" | "C";
+  }
+
+  if (winnerModeChoice === "llm" || winnerModeChoice === "blend") {
+    const promptMode = await ctx.ui.select("LLM prompt source", ["file", "inline"]);
+    if (!promptMode) return { cancelled: true };
+    llmPromptMode = promptMode as "file" | "inline";
+
+    if (llmPromptMode === "inline") {
+      llmPromptInline = (await ctx.ui.input("Inline LLM prompt", "Prefer correctness first, then safety, then efficiency."))?.trim() ?? "";
+    }
+
+    const includeToolCallsChoice = await ctx.ui.select("Include lane tool-call transcripts for LLM judging?", ["no", "yes"]);
+    if (!includeToolCallsChoice) return { cancelled: true };
+    includeToolCalls = includeToolCallsChoice === "yes";
+  }
+
+  if (winnerModeChoice === "blend") {
+    const hm = await ctx.ui.select("Blend mode", ["llm_tiebreaker", "llm_score"]);
+    if (!hm) return { cancelled: true };
+    blendMode = hm as "llm_tiebreaker" | "llm_score";
+
+    if (blendMode === "llm_score") {
+      const formulaRaw = await ctx.ui.input("Formula weight", "1.0");
+      if (formulaRaw == null) return { cancelled: true };
+      const llmRaw = await ctx.ui.input("LLM weight", "1.0");
+      if (llmRaw == null) return { cancelled: true };
+      formulaWeight = Number.isFinite(Number(formulaRaw)) ? Number(formulaRaw) : 1;
+      llmWeight = Number.isFinite(Number(llmRaw)) ? Number(llmRaw) : 1;
+    }
+  }
 
   const expDir = experimentsDir(ctx.cwd, scope);
   const promptDir = promptsDir(ctx.cwd, scope);
@@ -96,82 +113,96 @@ export async function runAbWizard(
   const config = {
     id,
     enabled: true,
-    target_tool: targetTool,
-    trigger: {
-      sample_rate: Number.isFinite(sampleRate) ? Number(sampleRate.toFixed(2)) : 1,
-      ...(regex ? { when_path_regex: regex } : {}),
+    tool: {
+      name: targetTool,
     },
-    execution_strategy: executionStrategyChoice,
-    timeout_ms: timeoutMs,
-    winner_mode: winnerModeChoice,
-    ...(winnerModeChoice !== "shadow"
+    ...(Number.isFinite(sampleRate) || regex
       ? {
-          selection: {
-            deterministic: {
+          trigger: {
+            ...(Number.isFinite(sampleRate) ? { sample_rate: Number(sampleRate.toFixed(2)) } : {}),
+            ...(regex ? { when_path_regex: regex } : {}),
+          },
+        }
+      : {}),
+    execution: {
+      strategy: executionStrategyChoice,
+      timeout_ms: timeoutMs,
+    },
+    winner: {
+      mode: winnerModeChoice,
+      ...(winnerModeChoice === "hardcoded" ? { hardcoded_lane: hardcodedWinnerLane } : {}),
+      ...(winnerModeChoice === "formula" || winnerModeChoice === "blend"
+        ? {
+            formula: {
               objective: "min(latency_ms)",
               tie_breakers: ["max(success)", "min(total_tokens)"],
             },
-            ...(winnerModeChoice === "hybrid"
-              ? {
-                  hybrid: {
-                    mode: hybridModeChoice,
-                    ...(hybridModeChoice === "llm_score"
-                      ? {
-                          deterministic_weight: Number(hybridDetWeight.toFixed(3)),
-                          llm_weight: Number(hybridLlmWeight.toFixed(3)),
-                        }
-                      : {}),
-                  },
-                }
-              : {}),
-          },
-        }
-      : {}),
-    ...((winnerModeChoice === "grading" || winnerModeChoice === "hybrid")
-      ? {
-          grading: {
-            execution: "process",
-            timeout_ms: 12000,
-            prompt_file: promptPath,
-            include: {
-              tool_calls: includeToolCallsInGrading,
+          }
+        : {}),
+      ...(winnerModeChoice === "llm" || winnerModeChoice === "blend"
+        ? {
+            llm: {
+              execution: "process",
+              timeout_ms: 12000,
+              ...(llmPromptMode === "file"
+                ? { prompt_file: promptPath }
+                : llmPromptInline
+                  ? { prompt: llmPromptInline }
+                  : {}),
+              ...(includeToolCalls ? { include_tool_calls: true } : {}),
             },
-          },
-        }
-      : {}),
+          }
+        : {}),
+      ...(winnerModeChoice === "blend"
+        ? {
+            blend: {
+              mode: blendMode,
+              ...(blendMode === "llm_score"
+                ? {
+                    formula_weight: Number(formulaWeight.toFixed(3)),
+                    llm_weight: Number(llmWeight.toFixed(3)),
+                  }
+                : {}),
+            },
+          }
+        : {}),
+    },
     lanes: [
-      { id: "A", primary: primaryLaneChoice === "A", extensions: [laneA] },
-      { id: "B", primary: primaryLaneChoice === "B", extensions: [laneB] },
-      { id: "C", primary: primaryLaneChoice === "C", extensions: [laneC] },
+      { label: "A", baseline: baselineLaneChoice === "A", extensions: [laneA] },
+      { label: "B", baseline: baselineLaneChoice === "B", extensions: [laneB] },
+      { label: "C", baseline: baselineLaneChoice === "C", extensions: [laneC] },
     ],
     failure_policy: {
       on_lane_timeout: "exclude_continue",
       on_lane_crash: "exclude_continue",
-      on_grading_failure: "fallback_deterministic_then_shadow",
-      on_winner_apply_failure: "fallback_primary_then_fail",
-      all_lanes_failed: "fallback_primary",
+      on_llm_failure: "fallback_formula_then_baseline",
+      on_winner_apply_failure: "fallback_baseline_then_fail",
+      all_lanes_failed: "fallback_baseline",
     },
-    debug: false,
+    debug: {
+      enabled: false,
+      ui: "none",
+    },
   };
 
   if (regex && executionStrategyChoice !== "fixed_args") {
     ctx.ui.notify(
-      "when_path_regex only applies when tool args include a path. For lane_single_call/lane_multi_call this is typically ignored unless your tool schema has path.",
+      "trigger.when_path_regex only applies when tool args include a path. For lane_single_call/lane_multi_call this is usually ignored unless your tool schema has path.",
       "warning",
     );
   }
 
   writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
 
-  if ((winnerModeChoice === "grading" || winnerModeChoice === "hybrid") && !existsSync(promptPath)) {
-    const prompt = `You are grading lane outputs for a coding-tool A/B experiment.\nReturn strict JSON only:\n{\"winner_lane_id\":\"<id>\",\"scores\":[{\"lane_id\":\"A\",\"score\":0.0,\"reason\":\"...\"}],\"confidence\":0.0,\"tie_break_used\":\"...\",\"notes\":\"...\"}\nRules: scores must be within [0.0, 1.0]. Evaluate correctness first, then minimal safe changes, then efficiency metrics.`;
+  if ((winnerModeChoice === "llm" || winnerModeChoice === "blend") && llmPromptMode === "file" && !existsSync(promptPath)) {
+    const prompt = `You are grading lane outputs for a coding-tool A/B experiment.\nReturn strict JSON only:\n{"winner_lane_id":"<id>","scores":[{"lane_id":"A","score":0.0,"reason":"..."}],"confidence":0.0,"tie_break_used":"...","notes":"..."}\nRules: scores must be within [0.0, 1.0]. Evaluate correctness first, then minimal safe changes, then efficiency metrics.`;
     mkdirSync(dirname(promptPath), { recursive: true });
     writeFileSync(promptPath, prompt, "utf8");
   }
 
   if (targetTool !== "edit" && executionStrategyChoice === "fixed_args") {
     ctx.ui.notify(
-      `Experiment saved for target_tool='${targetTool}' (fixed_args). Ensure each lane exposes '${targetTool}' with compatible schema; capability policy is logged as intersection/best_effort in run.json.`,
+      `Experiment saved for tool.name='${targetTool}' (fixed_args). Ensure each lane exposes '${targetTool}' with compatible schema; capability policy is logged as intersection/best_effort in run.json.`,
       "info",
     );
   }

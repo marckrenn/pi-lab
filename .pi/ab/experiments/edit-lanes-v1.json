@@ -1,16 +1,20 @@
 {
   "id": "edit-lanes-v1",
   "enabled": true,
-  "target_tool": "edit",
+  "tool": {
+    "name": "edit"
+  },
   "trigger": {
     "sample_rate": 1,
     "when_path_regex": "^fixtures/ab-test/"
   },
-  "execution_strategy": "fixed_args",
-  "timeout_ms": 15000,
-  "winner_mode": "deterministic",
-  "selection": {
-    "deterministic": {
+  "execution": {
+    "strategy": "fixed_args",
+    "timeout_ms": 15000
+  },
+  "winner": {
+    "mode": "formula",
+    "formula": {
       "objective": "min(latency_ms)",
       "tie_breakers": [
         "max(success)",
@@ -20,22 +24,20 @@
   },
   "lanes": [
     {
-      "id": "A",
-      "primary": false,
+      "label": "A",
       "extensions": [
         "./fixtures/ab-test/lanes/edit-perm-a.ts"
       ]
     },
     {
-      "id": "B",
-      "primary": true,
+      "label": "B",
+      "baseline": true,
       "extensions": [
         "./fixtures/ab-test/lanes/edit-perm-b.ts"
       ]
     },
     {
-      "id": "C",
-      "primary": false,
+      "label": "C",
       "extensions": [
         "./fixtures/ab-test/lanes/edit-perm-c.ts"
       ]
@@ -44,10 +46,12 @@
   "failure_policy": {
     "on_lane_timeout": "exclude_continue",
     "on_lane_crash": "exclude_continue",
-    "on_grading_failure": "fallback_deterministic_then_shadow",
-    "on_winner_apply_failure": "fallback_primary_then_fail",
-    "all_lanes_failed": "fallback_primary"
+    "on_llm_failure": "fallback_formula_then_baseline",
+    "on_winner_apply_failure": "fallback_baseline_then_fail",
+    "all_lanes_failed": "fallback_baseline"
   },
-  "debug": false,
-  "debug_ui": "none"
+  "debug": {
+    "enabled": false,
+    "ui": "none"
+  }
 }

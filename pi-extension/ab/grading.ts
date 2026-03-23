@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { LoadedExperiment, LaneRunRecord } from "./types.ts";
 import type { RunContext } from "./storage.ts";
 import { extractFirstJsonObject, modelToCli, runCommand, safeJsonParse } from "./utils.ts";
-import { resolveConfiguredPath } from "./config.ts";
+import { debugEnabledOf, debugUiOf, llmConfigOf, resolveConfiguredPath, winnerModeOf } from "./config.ts";
 import {
   closeCmuxSurface,
   closeCmuxSurfacesByTitlePrefix,
@@ -30,12 +30,15 @@ export type GradingErrorCode =
   | "grader_output_invalid_schema";
 
 function loadGradingPrompt(loaded: LoadedExperiment, cwd: string): string {
-  const p = loaded.experiment.grading?.prompt_file ?? loaded.experiment.selection?.grading?.prompt_file;
-  if (!p) {
+  const llm = llmConfigOf(loaded.experiment);
+  if (llm.prompt) {
+    return llm.prompt;
+  }
+  if (!llm.prompt_file) {
     return "Grade the provided lane outputs and return strict JSON.";
   }
 
-  const resolved = resolveConfiguredPath(p, cwd, loaded.path);
+  const resolved = resolveConfiguredPath(llm.prompt_file, cwd, loaded.path);
   if (!existsSync(resolved)) {
     return "Grade the provided lane outputs and return strict JSON.";
   }
@@ -267,14 +270,12 @@ export async function runGradingProcess(
   signal?: AbortSignal,
 ): Promise<{ result: GradingResult | null; error?: string; error_code?: GradingErrorCode }> {
   const promptText = loadGradingPrompt(loaded, cwd);
-  const includeToolCalls =
-    loaded.experiment.grading?.include?.tool_calls ??
-    loaded.experiment.selection?.grading?.include?.tool_calls ??
-    false;
+  const llm = llmConfigOf(loaded.experiment);
+  const includeToolCalls = llm.include_tool_calls ?? false;
 
   const gradingInput: Record<string, unknown> = {
     experiment_id: loaded.experiment.id,
-    winner_mode: loaded.experiment.winner_mode,
+    winner_mode: winnerModeOf(loaded.experiment),
     intercepted_tool: args.intercepted_tool,
     intercepted_args: args.intercepted_args,
     lanes,
@@ -298,8 +299,8 @@ export async function runGradingProcess(
     "utf8",
   );
 
-  const timeoutMs = loaded.experiment.grading?.timeout_ms ?? loaded.experiment.selection?.grading?.timeout_ms ?? 12000;
-  const modelOverride = loaded.experiment.grading?.model ?? loaded.experiment.selection?.grading?.model;
+  const timeoutMs = llm.timeout_ms ?? 12000;
+  const modelOverride = llm.model;
   const model = modelOverride ?? modelToCli(currentModel);
 
   const argsPiBase: string[] = ["-p", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"];
@@ -307,7 +308,7 @@ export async function runGradingProcess(
     argsPiBase.push("--model", model);
   }
 
-  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? loaded.experiment.debug_ui ?? "none").toLowerCase();
+  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? debugUiOf(loaded.experiment) ?? "none").toLowerCase();
 
   let attempt = 1;
   let lastSchemaError: string | undefined;
@@ -336,7 +337,7 @@ export async function runGradingProcess(
       cwd,
       timeoutMs,
       signal,
-      useCmuxSurface: loaded.experiment.debug === true && debugUiMode !== "none",
+      useCmuxSurface: debugEnabledOf(loaded.experiment) && debugUiMode !== "none",
     });
 
     const rawOutPath = join(run.dir, "artifacts", `grading-raw-output-${attempt}.md`);
