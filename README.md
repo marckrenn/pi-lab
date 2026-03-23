@@ -79,6 +79,9 @@ A/B runs accumulate under:
 - with `--force`, it actually removes those old run folders
 - you can also use `--older-than 7d`, `--project NAME`, or `--all-projects`
 
+> **Note**
+> Start with the dry-run version first. It is the safe way to confirm which run folders would be deleted.
+
 ### Where config lives
 
 Experiment config files live in:
@@ -88,7 +91,8 @@ Experiment config files live in:
 
 This extension is now **JSON-only** for experiment config.
 
-If the same experiment id exists in both places, the project-local config wins.
+> **Note**
+> If the same experiment id exists in both places, the project-local config wins.
 
 ### Wizard flow
 
@@ -148,6 +152,9 @@ That gives you:
 | `lane_single_call` | `{ task, context?, constraints? }` | Exactly one target-tool call + `LANE_DONE` | Best when each lane may shape the call differently, but must stay one-call-only |
 | `lane_multi_call` | `{ task, context?, constraints? }` | Multi-step lane flow + strict final JSON | Best when lane extensions need their own planning or tool chaining |
 
+> **Note**
+> If you are unsure, start with `fixed_args`. It is the simplest model and usually the easiest one to debug.
+
 ## Stage 4: Choose winner
 
 ### What “winner” means
@@ -161,6 +168,9 @@ So `winner` is just the lane whose output/patch is actually applied.
 If you prefer different language, you can read it as:
 - `winner` ≈ **proceed_with lane**
 - `formula` / `llm` / `blend` ≈ **grading strategy**
+
+> **Note**
+> In other words: several lanes may run, but only one lane is the one the system actually proceeds with.
 
 ### Who decides the winner?
 
@@ -271,6 +281,9 @@ Notes:
 - omitting `execution` defaults to `fixed_args`
 - omitting `winner.formula.objective` defaults to `min(latency_ms)`
 - if no lane is marked `baseline`, the first lane becomes baseline automatically
+
+> **Note**
+> The smallest config is intentionally tiny. You can start there and add trigger rules, failure policy, and LLM grading only when you actually need them.
 
 
 ### Hardcoded winner
@@ -498,6 +511,9 @@ This project is intentionally early-stage. Important missing pieces include:
 - **Safer rollout controls**: policy presets, guardrails, and better blast-radius limits.
 - **Richer eval workflows**: better batch grading, regression suites, and trend analysis.
 - **Schema stability pass**: lock naming after a few more real-world iterations.
+
+> **Note**
+> The telemetry-upload piece is intentionally listed here as future work. Today, artifacts stay local on disk.
 
 If you want to contribute ideas, open an issue/PR with:
 - your use case,
