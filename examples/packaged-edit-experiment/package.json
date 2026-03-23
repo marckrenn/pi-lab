@@ -1,0 +1,15 @@
+{
+  "name": "packaged-edit-experiment",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Packaged pi-ab sample for a full-extension-bundle edit experiment.",
+  "type": "module",
+  "main": "index.ts",
+  "exports": "./index.ts",
+  "scripts": {
+    "pi": "pi -e ."
+  },
+  "dependencies": {
+    "pi-ab-wip": "file:../.."
+  }
+}
