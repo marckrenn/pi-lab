@@ -6,17 +6,20 @@ pi A/B conductor extension for running multiple lane variants behind one tool na
 > This project is an early idea / toy prototype. It is **not production ready**. Expect breaking schema changes, rough edges, and missing operational features.
 
 It is useful when you want to:
-- compare multiple implementations of the same tool
-- benchmark prompt or extension variants in isolation
-- let a formula, an LLM, or both choose the winning lane
+- compare permutations of a tool or extension
+- try alternative lane extensions that carry different prompts, tools, or behavior
+- let a formula, an LLM, or both choose which lane to proceed with
 - keep a safe fallback lane while still collecting telemetry from alternatives
+
+A lane is usually not just a raw function implementation.
+In practice, each lane activates one or more extension files inside an isolated environment. Those extensions can override a tool, carry a different prompt, or change tool-usage behavior. So the mental model is closer to **comparing lane permutations at the extension/tool-behavior level** than just swapping one function body.
 
 ## When to use this
 
 Use it when you need at least one of these:
-- safe side-by-side tool comparison
-- formula-based winner selection from measurable metrics
-- LLM-based winner selection for semantic quality
+- safe side-by-side comparison of lane permutations
+- formula-based lane grading from measurable metrics
+- LLM-based lane grading for semantic quality
 - reproducible run artifacts for debugging and regression analysis
 
 ## When not to use this
@@ -49,9 +52,32 @@ Inside pi:
 /ab wizard                     # create a new experiment config interactively
 /ab status                     # show loaded experiments and where they came from
 /ab validate                   # show config errors/warnings before you run anything
-/ab gc --keep-last 10          # preview which old runs would be removed
-/ab gc --keep-last 10 --force  # actually delete the matching old runs
+/ab gc --keep-last 10          # dry-run: show which old run folders would be deleted
+/ab gc --keep-last 10 --force  # actually delete old run folders, keeping the newest 10
 ```
+
+### What `/ab gc` does
+
+A/B runs accumulate under:
+
+`~/.pi/agent/ab/runs/<project>/<run-id>/`
+
+`/ab gc` is just garbage collection for those run artifacts.
+
+- by default it works on the **current project**
+- `--keep-last 10` protects the 10 newest runs and targets older ones
+- without `--force`, it is a **dry run** and only shows what would be deleted
+- with `--force`, it actually removes those old run folders
+- you can also use `--older-than 7d`, `--project NAME`, or `--all-projects`
+
+### Where config lives
+
+Experiment config files live in:
+
+- **project-local**: `.pi/ab/experiments/*.json` or `*.yaml`
+- **global**: `~/.pi/agent/ab/experiments/*.json` or `*.yaml`
+
+If the same experiment id exists in both places, the project-local config wins.
 
 ### Wizard flow
 
@@ -97,19 +123,19 @@ That gives you:
 
 ### Which strategy should I use?
 
-| If your situation is... | Use |
-|---|---|
-| All lanes expose the same tool shape and accept the same args | `fixed_args` |
-| Lanes should each make exactly one target-tool call | `lane_single_call` |
-| Lanes may need lane-specific replanning or tool chaining | `lane_multi_call` |
+| If your situation is... | Use | All lanes share same arguments? |
+|---|---|---|
+| All lanes expose the same tool shape and accept the same args | `fixed_args` | true |
+| Lanes should each make exactly one target-tool call | `lane_single_call` | false |
+| Lanes may need lane-specific replanning or tool chaining | `lane_multi_call` | false |
 
 ### Strategy details
 
-| Strategy | Lane input | Typical harness | Protocol | Use case |
-|---|---|---|---|---|
-| `fixed_args` | Same intercepted args for all lanes | `direct` | Lane calls intercepted tool directly | Apples-to-apples implementation comparison |
-| `lane_single_call` | `{ task, context?, constraints? }` | `pi_prompt` | Exactly one target-tool call + `LANE_DONE` | One-call discipline with lane-specific argument schemas |
-| `lane_multi_call` | `{ task, context?, constraints? }` | `pi_prompt` | Multi-step lane flow + strict final JSON | Lane-level replanning/tool chaining |
+| Strategy | Lane input | Protocol | Use case |
+|---|---|---|---|
+| `fixed_args` | Same intercepted args for all lanes | Lane calls intercepted tool directly | Best when the experiment is a clean apples-to-apples comparison |
+| `lane_single_call` | `{ task, context?, constraints? }` | Exactly one target-tool call + `LANE_DONE` | Best when each lane may shape the call differently, but must stay one-call-only |
+| `lane_multi_call` | `{ task, context?, constraints? }` | Multi-step lane flow + strict final JSON | Best when lane extensions need their own planning or tool chaining |
 
 ## Stage 4: Choose winner
 
@@ -125,16 +151,14 @@ If you prefer different language, you can read it as:
 - `winner` ≈ **proceed_with lane**
 - `formula` / `llm` / `blend` ≈ **grading strategy**
 
-(We can rename schema keys later, but currently the code/config uses `winner.*`.)
-
 ### Who decides the winner?
 
 | `winner.mode` | Who decides? | Inputs used | Typical use |
 |---|---|---|---|
 | `hardcoded` | Explicit configured lane | None | Safe rollout where one lane must always win |
-| `formula` | Formula engine | Metrics | Cheap, explainable winner selection |
+| `formula` | 🏎️ Formula engine | Metrics like `latency_ms`, `success`, `total_tokens`, `error`, `timeout` | Cheap, fast, deterministic winner selection |
 | `llm` | LLM judge | Lane outputs + optional tool-call context | Semantic quality selection |
-| `blend` | Formula engine + LLM judge | Metrics + LLM scores | Balance objective metrics and semantic quality |
+| `blend` | 🏎️ Formula engine + LLM judge | Metrics + LLM scores | Balance objective metrics and semantic quality |
 
 ### Winner modes
 
@@ -146,7 +170,14 @@ Use this when you want observability from other lanes, but mergeback must always
 #### `formula`
 The winner is chosen from `winner.formula.objective` and optional `tie_breakers`.
 
-Use this when measurable metrics are enough.
+Typical metrics include:
+- `latency_ms`
+- `success`
+- `total_tokens`
+- `error`
+- `timeout`
+
+Use this when measurable metrics are enough and you want a cheap, fast, deterministic grading step.
 
 #### `llm`
 The winner is chosen by the LLM judge.
@@ -207,35 +238,9 @@ Common files:
 
 ---
 
-## Config mental model
+## Config examples
 
-Think of the config in six blocks:
-
-1. **Identity** — what this experiment is called
-2. **Tool** — which tool is intercepted
-3. **Trigger** — when the experiment is eligible to run
-4. **Execution** — how lanes run
-5. **Winner** — how the winner is chosen
-6. **Operations** — lanes, failure policy, debug
-
-## You configure vs the system infers
-
-### You configure
-- `tool.name`
-- optional `trigger`
-- `execution.strategy`
-- `winner.mode`
-- `lanes`
-- optional `winner.formula`, `winner.llm`, `winner.blend`, `failure_policy`, `debug`
-
-### The system infers
-- lane ids when omitted
-- whether path-gating is applicable for a given tool call
-- which artifacts are produced from the execution path
-
----
-
-## Smallest valid config
+### Smallest valid config
 
 ```json
 {
@@ -256,9 +261,6 @@ Notes:
 - omitting `winner.formula.objective` defaults to `min(latency_ms)`
 - if no lane is marked `baseline`, the first lane becomes baseline automatically
 
----
-
-## Config examples
 
 ### Hardcoded winner
 
