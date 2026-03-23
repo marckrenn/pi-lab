@@ -2,6 +2,9 @@
 
 pi A/B conductor extension for running multiple lane variants behind one tool name, comparing them safely, and returning one selected result.
 
+> ⚠️ **Highly experimental**
+> This project is an early idea / toy prototype. It is **not production ready**. Expect breaking schema changes, rough edges, and missing operational features.
+
 It is useful when you want to:
 - compare multiple implementations of the same tool
 - benchmark prompt or extension variants in isolation
@@ -108,19 +111,21 @@ That gives you:
 | `lane_single_call` | `{ task, context?, constraints? }` | `pi_prompt` | Exactly one target-tool call + `LANE_DONE` | One-call discipline with lane-specific argument schemas |
 | `lane_multi_call` | `{ task, context?, constraints? }` | `pi_prompt` | Multi-step lane flow + strict final JSON | Lane-level replanning/tool chaining |
 
-### What the system infers
-
-The system infers lane harness from `execution.strategy`:
-- `fixed_args` → `direct`
-- `lane_single_call` / `lane_multi_call` → `pi_prompt`
-
-Advanced override remains available via:
-
-```bash
-PI_AB_LANE_HARNESS=direct|pi_prompt
-```
-
 ## Stage 4: Choose winner
+
+### What “winner” means
+
+In plain words:
+1. **Grade** each lane result (by formula, LLM, or both).
+2. **Proceed with** one lane result (the one called the `winner` in config/runtime).
+
+So `winner` is just the lane whose output/patch is actually applied.
+
+If you prefer different language, you can read it as:
+- `winner` ≈ **proceed_with lane**
+- `formula` / `llm` / `blend` ≈ **grading strategy**
+
+(We can rename schema keys later, but currently the code/config uses `winner.*`.)
 
 ### Who decides the winner?
 
@@ -225,8 +230,7 @@ Think of the config in six blocks:
 
 ### The system infers
 - lane ids when omitted
-- lane harness from strategy
-- whether path-gating is applicable
+- whether path-gating is applicable for a given tool call
 - which artifacts are produced from the execution path
 
 ---
@@ -470,8 +474,22 @@ Env overrides:
 PI_AB_DEBUG_UI=cmux
 PI_AB_KEEP_PANES=1
 PI_AB_DEBUG_JSON=1
-PI_AB_LANE_HARNESS=direct|pi_prompt
 ```
+
+## Future work / missing pieces
+
+This project is intentionally early-stage. Important missing pieces include:
+
+- **Telemetry backend**: upload run summaries/artifacts to a central server (not implemented yet).
+- **Hosted dashboard**: compare experiments across machines/repos over time.
+- **Safer rollout controls**: policy presets, guardrails, and better blast-radius limits.
+- **Richer eval workflows**: better batch grading, regression suites, and trend analysis.
+- **Schema stability pass**: lock naming after a few more real-world iterations.
+
+If you want to contribute ideas, open an issue/PR with:
+- your use case,
+- what broke or felt confusing,
+- and what signal you needed but couldn’t get.
 
 ## Project files
 
