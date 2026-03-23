@@ -1,116 +1,160 @@
 # pi-ab-wip
 
-A work-in-progress **pi extension** for A/B/C experimentation of tool+prompt behavior behind a transparent tool interception layer.
+Work-in-progress **pi A/B conductor extension** for transparent tool interception, lane isolation, winner selection, and telemetry.
 
-## Current status
+## What it supports today
 
-Implemented prototype:
-
-- `edit` override that transparently intercepts when trigger policy matches (`execution_strategy: "fixed_args"`)
-- Generic non-edit interception:
-  - `execution_strategy: "fixed_args"` → transparent override with identical args across lanes
-  - `execution_strategy: "lane_single_call"` → proxy flow with exactly one target-tool call per lane
-  - `execution_strategy: "lane_multi_call"` → proxy flow with lane-specific multi-step replanning (`{ task, context?, constraints? }`)
-  - `target_tool`/`trigger.tool` are real gates
-- Global/project experiment loading with project-overrides-global precedence
-- Setup wizard (`/ab wizard` and `ab_setup_wizard` tool)
-- Lane execution in isolated git worktrees (sandbox for lane side effects)
-  - `execution_strategy: "fixed_args"` (transparent same-args lane execution)
-  - `execution_strategy: "lane_single_call"` (proxy flow; one target-tool call per lane)
-  - `execution_strategy: "lane_multi_call"` (proxy flow; lane-specific multi-step replanning)
-  - default `lane_harness: "direct"` for fixed_args
-  - `lane_harness: "pi_prompt"` for lane_single_call / lane_multi_call
-- Winner selection modes:
+- Transparent interception by `target_tool` + `trigger` policy
+- Three execution strategies:
+  - `fixed_args`
+  - `lane_single_call`
+  - `lane_multi_call`
+- Four winner modes:
   - `shadow`
   - `deterministic`
-  - `grading` (separate grader `pi` process)
-  - `hybrid`
-    - `llm_tiebreaker` (LLM breaks deterministic ties)
-    - `llm_score` (injects `{llm_score}` + `{deterministic_score}` into template scoring)
-- Winner patch apply back to main workspace (`git apply` + `--3way` fallback)
-- Run artifacts under `~/.pi/agent/ab/runs/...`
+  - `grading`
+  - `hybrid` (`llm_tiebreaker`, `llm_score`)
+- Lane execution in isolated git worktrees
+- Winner patch application back to main workspace (`git apply`, then `--3way` fallback)
+- Grading in a separate `pi` process
+- Run artifacts under `~/.pi/agent/ab/runs/<project>/<run-id>/`
 
-Still rough / next hardening:
-
-- Richer grading confidence handling/aggregation policy
-- Additional deterministic selection metrics and confidence reporting
-- Optional retention policies (auto-gc schedules)
-
-`debug: true` enables debug execution. By default (`debug_ui: "none"`) lanes/grader run headless in the background. Set `debug_ui: "cmux"` to open panes when running inside cmux.
-
-Debug UI controls:
-- `"debug_ui": "none"` (default) -> headless/background lane+grader execution (no panes)
-- `"debug_ui": "cmux"` -> visible panes (for `lane_harness: "pi_prompt"`)
-- env override: `PI_AB_DEBUG_UI=none|cmux`
-
-Other debug env flags:
-- `PI_AB_KEEP_PANES=1` keep panes open after completion
-- `PI_AB_DEBUG_JSON=1` stream JSON event output in panes (off by default for readability)
-- `PI_AB_LANE_HARNESS=direct|pi_prompt` override lane harness per run
-
-Execution strategy notes:
-- `execution_strategy: "fixed_args"` → conductor forwards one canonical call shape to all lanes.
-  - Run manifest telemetry includes schema fairness as `capability_policy: "intersection" | "best_effort"` plus key sets.
-- `execution_strategy: "lane_single_call"` → proxy flow where each lane calls the target tool exactly once (lane-specific schema allowed).
-- `execution_strategy: "lane_multi_call"` → generic meta-tool flow where lanes can receive their own API and replan via `pi_prompt` lane sessions.
-  - Main-lane proxy schema: `{ task, context?, constraints? }`.
-- Grading input can optionally include per-lane tool-call transcripts (`grading.include.tool_calls: true`).
-- Hybrid llm_score supports template formulas via:
-  - `selection.hybrid.final_objective` (e.g. `max({deterministic_score} * 0.6 + {llm_score} * 0.4)`)
-  - `selection.hybrid.final_tie_breakers`
-
-## Files
-
-- `pi-extension/ab/index.ts` — extension entrypoint, command/tool registrations, orchestration
-- `pi-extension/ab/winner.ts` — winner selection + fallback logic (shadow/deterministic/grading)
-- `pi-extension/ab/gc.ts` — `/ab gc` parsing and retention execution
-- `pi-extension/ab/wizard.ts` — interactive setup wizard
-- `pi-extension/ab/config.ts` — experiment discovery + trigger selection
-- `pi-extension/ab/runner.ts` — worktree lane execution + patch apply helpers
-- `pi-extension/ab/grading.ts` — separate grader process orchestration
-- `pi-extension/ab/selection.ts` — deterministic lane selection
-- `pi-extension/ab/storage.ts` — run artifact paths and writes
-- `pi-extension/ab/types.ts` — config and run types
-
-Project sample config:
-
-- `.pi/ab/experiments/edit-lanes-v1.json`
-- `.pi/ab/prompts/grade-default.md`
-
-Controllable fixture:
-
-- `fixtures/ab-test/target.txt`
-- `fixtures/ab-test/lanes/edit-perm-{a,b,c}.ts`
-
-## Install / run locally
+## Quick start
 
 ```bash
-# npm install is optional now (no runtime deps required)
+cd /Users/marckrenn/Documents/projects/pi-ab-wip
 pi -e ./pi-extension/ab/index.ts
 ```
 
-Then in pi:
+Inside pi:
 
 ```text
 /ab wizard
 /ab status
+/ab validate
 /ab gc --keep-last 10         # dry-run
 /ab gc --keep-last 10 --force # delete
 ```
 
-## Controllable test use case
+## Core concepts
 
-Prompt:
+### Execution strategy
 
-```text
-Replace TOKEN=OLD with TOKEN=NEW in fixtures/ab-test/target.txt
+| Strategy | What lanes receive | Typical harness | Protocol |
+|---|---|---|---|
+| `fixed_args` | Same intercepted args for all lanes | `direct` | Lane calls intercepted tool directly |
+| `lane_single_call` | `{ task, context?, constraints? }` wrapper | `pi_prompt` | Exactly one target-tool call + `LANE_DONE` |
+| `lane_multi_call` | `{ task, context?, constraints? }` wrapper | `pi_prompt` | Multi-step lane flow with strict final JSON |
+
+### Winner mode
+
+| Mode | Behavior |
+|---|---|
+| `shadow` | Keep primary lane output |
+| `deterministic` | Formula/tie-break based ranking |
+| `grading` | External grader picks winner; fallback policy on failure |
+| `hybrid` | Deterministic + LLM (`llm_tiebreaker` or `llm_score`) |
+
+## Hybrid template scoring (new)
+
+For `mode: "hybrid"` + `selection.hybrid.mode: "llm_score"`, the final ranking can use template formulas directly.
+
+Injected metrics per lane:
+- `{llm_score}` (0..1 from grader)
+- `{deterministic_score}` (normalized deterministic rank)
+
+Optional config:
+
+```json
+{
+  "mode": "hybrid",
+  "selection": {
+    "deterministic": {
+      "objective": "min({latency_ms} + {error} * 100000 + {timeout} * 100000)",
+      "tie_breakers": ["max(success)"]
+    },
+    "hybrid": {
+      "mode": "llm_score",
+      "deterministic_weight": 0.6,
+      "llm_weight": 0.4,
+      "final_objective": "max({deterministic_score} * 0.6 + {llm_score} * 0.4)",
+      "final_tie_breakers": ["max(llm_score)"]
+    }
+  }
+}
 ```
 
-Expected:
+If `final_objective` is omitted, a default weighted formula is used.
 
-1. Tool call is intercepted by conductor (if trigger matches).
-2. Lanes A/B/C run in isolated worktrees.
-3. Winner is selected (deterministic by default in sample config).
-4. Winner patch is applied to main workspace.
-5. Run artifacts are written under:
-   - `~/.pi/agent/ab/runs/pi-ab-wip/<run-id>/`
+## Grading and transcripts
+
+- Grading runs in a separate `pi` process (`--no-extensions --no-skills ...`)
+- Grader output must be strict JSON and scores must be in `[0,1]`
+- On malformed grader output, conductor performs one stricter retry
+- Optional transcript enrichment:
+
+```json
+{
+  "grading": {
+    "include": {
+      "tool_calls": true
+    }
+  }
+}
+```
+
+When enabled, `artifacts/grading-input.json` includes `lane_tool_calls`.
+
+## Validation behavior
+
+`/ab validate` reports per-experiment warnings/errors, including:
+- unsupported `execution_strategy`
+- missing required fields (`target_tool`, `trigger.tool`, lanes)
+- suspicious `trigger.tool != target_tool`
+- `when_path_regex` warning for proxy strategies
+
+Invalid experiments are skipped at runtime.
+
+## Artifacts
+
+Per-run directory:
+
+- `run.json` (winner + selection source + fallback reason codes)
+- `lanes/{id}.json` (lane status/metrics/errors)
+- `artifacts/grading-input.json`
+- `artifacts/grading-output.json`
+- `artifacts/grading-raw-output-*.txt`
+- `sessions/...` for prompt-based lane harness runs
+
+## Debug controls
+
+Config:
+- `"debug": true|false`
+- `"debug_ui": "none" | "cmux"` (default `none`)
+
+Env overrides:
+
+```bash
+PI_AB_DEBUG_UI=cmux
+PI_AB_KEEP_PANES=1
+PI_AB_DEBUG_JSON=1
+PI_AB_LANE_HARNESS=direct|pi_prompt
+```
+
+## Project files
+
+- `pi-extension/ab/index.ts` — extension entrypoint/interception wiring
+- `pi-extension/ab/config.ts` — config loading + validation + matching
+- `pi-extension/ab/runner.ts` — lane execution/worktree handling
+- `pi-extension/ab/selection.ts` — deterministic ranking/formula parsing
+- `pi-extension/ab/winner.ts` — shadow/deterministic/grading/hybrid selection
+- `pi-extension/ab/grading.ts` — grader process orchestration
+- `pi-extension/ab/wizard.ts` — setup wizard
+- `pi-extension/ab/gc.ts` — run retention/cleanup
+
+## Local checks
+
+```bash
+npm run typecheck
+npm test
+```
