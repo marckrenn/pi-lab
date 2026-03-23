@@ -7,6 +7,17 @@
     "when_path_regex": "^fixtures/ab-test/"
   },
   "execution_strategy": "fixed_args",
+  "timeout_ms": 15000,
+  "winner_mode": "deterministic",
+  "selection": {
+    "deterministic": {
+      "objective": "min(latency_ms)",
+      "tie_breakers": [
+        "max(success)",
+        "min(total_tokens)"
+      ]
+    }
+  },
   "lanes": [
     {
       "id": "A",
@@ -30,22 +41,6 @@
       ]
     }
   ],
-  "timeout_ms": 15000,
-  "debug": false,
-  "selection": {
-    "deterministic": {
-      "objective": "min(latency_ms)",
-      "tie_breakers": [
-        "max(success)",
-        "min(total_tokens)"
-      ]
-    }
-  },
-  "grading": {
-    "execution": "process",
-    "timeout_ms": 12000,
-    "prompt_file": "./.pi/ab/prompts/grade-default.md"
-  },
   "failure_policy": {
     "on_lane_timeout": "exclude_continue",
     "on_lane_crash": "exclude_continue",
@@ -53,5 +48,6 @@
     "on_winner_apply_failure": "fallback_primary_then_fail",
     "all_lanes_failed": "fallback_primary"
   },
-  "winner_mode": "deterministic"
+  "debug": false,
+  "debug_ui": "none"
 }
