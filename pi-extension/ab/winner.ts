@@ -197,6 +197,15 @@ export async function selectWinner(
   const primaryLaneId = getPrimaryLaneId(experiment);
   const success = successfulLanes(records, experiment.target_tool);
 
+  if (experiment.winner_mode === "shadow") {
+    return {
+      winner_lane_id: primaryLaneId,
+      mode_used: "shadow",
+      reason: "shadow mode: primary lane is always selected",
+      selection_source: "shadow_primary_forced",
+    };
+  }
+
   if (success.length === 0) {
     if (policy.all_lanes_failed === "fallback_primary") {
       return {
@@ -210,18 +219,7 @@ export async function selectWinner(
     throw new Error("All experiment lanes failed.");
   }
 
-  if (experiment.mode === "shadow") {
-    const hasPrimary = success.some((r) => r.lane_id === primaryLaneId);
-    return {
-      winner_lane_id: hasPrimary ? primaryLaneId : success[0].lane_id,
-      mode_used: "shadow",
-      reason: hasPrimary ? "shadow primary lane" : "shadow primary failed, first successful lane fallback",
-      selection_source: hasPrimary ? "shadow_primary" : "shadow_first_success_fallback",
-      fallback_reason_code: hasPrimary ? undefined : "shadow_primary_not_successful",
-    };
-  }
-
-  if (experiment.mode === "deterministic") {
+  if (experiment.winner_mode === "deterministic") {
     const picked = chooseDeterministicLane(experiment, records);
     if (!picked.laneId) throw new Error("Deterministic selection found no winner.");
     return {
@@ -232,7 +230,7 @@ export async function selectWinner(
     };
   }
 
-  if (experiment.mode === "hybrid") {
+  if (experiment.winner_mode === "hybrid") {
     return selectHybridWinner(loaded, run, cwd, records, success, gradingContext, model, signal);
   }
 

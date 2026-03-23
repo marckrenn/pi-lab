@@ -4,8 +4,8 @@ import { rankDeterministicLanes } from "../pi-extension/ab/selection.ts";
 const baseExperiment = {
   id: "e",
   target_tool: "calculator",
-  trigger: { tool: "calculator" },
-  mode: "deterministic",
+  trigger: {},
+  winner_mode: "deterministic",
   execution_strategy: "fixed_args",
   lanes: [
     { id: "A", primary: true, extensions: [] },

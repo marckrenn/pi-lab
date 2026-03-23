@@ -114,6 +114,10 @@ function fairnessManifestFields(fairness: CapabilityFairnessTelemetry): Record<s
   };
 }
 
+function inferLaneHarness(executionStrategy: unknown): "direct" | "pi_prompt" {
+  return canonicalExecutionStrategy(executionStrategy) === "fixed_args" ? "direct" : "pi_prompt";
+}
+
 async function runFixedArgsToolExperiment(
   params: Record<string, unknown>,
   toolName: string,
@@ -159,11 +163,11 @@ async function runFixedArgsToolExperiment(
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
-    mode: experiment.mode,
+    configured_winner_mode: experiment.winner_mode,
     intercepted_tool: toolName,
     intercepted_args: params,
     execution_strategy: canonicalExecutionStrategy(experiment.execution_strategy),
-    lane_harness: process.env.PI_AB_LANE_HARNESS ?? experiment.lane_harness ?? "direct",
+    lane_harness: process.env.PI_AB_LANE_HARNESS ?? inferLaneHarness(experiment.execution_strategy),
     trigger_bypassed: triggerBypassed || undefined,
     trigger_bypass_reason: triggerBypassed ? "no_native_delegate_for_nonmatching_trigger" : undefined,
     stage: "started",
@@ -217,7 +221,7 @@ async function runFixedArgsToolExperiment(
           run_id: run.runId,
           experiment_id: experiment.id,
           winner_lane_id: selected.lane_id,
-          mode: winner.mode_used,
+          winner_mode: winner.mode_used,
           selection_source: winner.selection_source,
           fallback_reason_code: winner.fallback_reason_code,
           grading_error: winner.grading_error,
@@ -252,7 +256,7 @@ async function runSingleCallFlowExperiment(
   });
   if (!loaded) {
     throw new Error(
-      `No active lane_single_call experiment matched tool '${toolName}'. Configure target_tool='${toolName}', trigger.tool='${toolName}', execution_strategy='lane_single_call'.`,
+      `No active lane_single_call experiment matched tool '${toolName}'. Configure target_tool='${toolName}' and execution_strategy='lane_single_call'.`,
     );
   }
 
@@ -263,7 +267,7 @@ async function runSingleCallFlowExperiment(
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
-    mode: experiment.mode,
+    configured_winner_mode: experiment.winner_mode,
     intercepted_tool: toolName,
     intercepted_args: {
       task_len: params.task.length,
@@ -271,7 +275,7 @@ async function runSingleCallFlowExperiment(
       constraints_len: (params.constraints ?? "").length,
     },
     execution_strategy: canonicalExecutionStrategy(experiment.execution_strategy),
-    lane_harness: "pi_prompt",
+    lane_harness: inferLaneHarness(experiment.execution_strategy),
     stage: "started",
   });
 
@@ -323,7 +327,7 @@ async function runSingleCallFlowExperiment(
           run_id: run.runId,
           experiment_id: experiment.id,
           winner_lane_id: selected.lane_id,
-          mode: winner.mode_used,
+          winner_mode: winner.mode_used,
           selection_source: winner.selection_source,
           fallback_reason_code: winner.fallback_reason_code,
           grading_error: winner.grading_error,
@@ -358,7 +362,7 @@ async function runMultiCallFlowExperiment(
   });
   if (!loaded) {
     throw new Error(
-      `No active lane_multi_call experiment matched tool '${toolName}'. Configure target_tool='${toolName}', trigger.tool='${toolName}', execution_strategy='lane_multi_call'.`,
+      `No active lane_multi_call experiment matched tool '${toolName}'. Configure target_tool='${toolName}' and execution_strategy='lane_multi_call'.`,
     );
   }
 
@@ -369,7 +373,7 @@ async function runMultiCallFlowExperiment(
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
-    mode: experiment.mode,
+    configured_winner_mode: experiment.winner_mode,
     intercepted_tool: toolName,
     intercepted_args: {
       task_len: params.task.length,
@@ -377,7 +381,7 @@ async function runMultiCallFlowExperiment(
       constraints_len: (params.constraints ?? "").length,
     },
     execution_strategy: canonicalExecutionStrategy(experiment.execution_strategy),
-    lane_harness: "pi_prompt",
+    lane_harness: inferLaneHarness(experiment.execution_strategy),
     stage: "started",
   });
 
@@ -427,7 +431,7 @@ async function runMultiCallFlowExperiment(
           run_id: run.runId,
           experiment_id: experiment.id,
           winner_lane_id: selected.lane_id,
-          mode: winner.mode_used,
+          winner_mode: winner.mode_used,
           selection_source: winner.selection_source,
           fallback_reason_code: winner.fallback_reason_code,
           grading_error: winner.grading_error,
@@ -572,7 +576,7 @@ export default function abConductorExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "ab_setup_wizard",
     label: "A/B Setup Wizard",
-    description: "Interactive wizard to create an experiment YAML (global or project scope).",
+    description: "Interactive wizard to create an experiment JSON config (global or project scope).",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const result = await runAbWizard(ctx);
@@ -613,11 +617,11 @@ export default function abConductorExtension(pi: ExtensionAPI) {
       writeRunManifest(run, experiment, {
         source: loaded.source,
         config_path: loaded.path,
-        mode: experiment.mode,
+        configured_winner_mode: experiment.winner_mode,
         intercepted_tool: "edit",
         intercepted_args: { path: params.path, oldText_len: params.oldText.length, newText_len: params.newText.length },
         execution_strategy: canonicalExecutionStrategy(experiment.execution_strategy),
-        lane_harness: process.env.PI_AB_LANE_HARNESS ?? experiment.lane_harness ?? "direct",
+        lane_harness: process.env.PI_AB_LANE_HARNESS ?? inferLaneHarness(experiment.execution_strategy),
         stage: "started",
       });
 
@@ -691,7 +695,7 @@ export default function abConductorExtension(pi: ExtensionAPI) {
                       run_id: run.runId,
                       experiment_id: experiment.id,
                       winner_lane_id: primary.lane_id,
-                      mode: winner.mode_used,
+                      winner_mode: winner.mode_used,
                       selection_source: "primary_apply_fallback",
                       fallback_applied: true,
                       fallback_reason_code: "winner_apply_failed_primary_apply_succeeded",
@@ -726,7 +730,7 @@ export default function abConductorExtension(pi: ExtensionAPI) {
               run_id: run.runId,
               experiment_id: experiment.id,
               winner_lane_id: selected.lane_id,
-              mode: winner.mode_used,
+              winner_mode: winner.mode_used,
               selection_source: winner.selection_source,
               fallback_reason_code: winner.fallback_reason_code,
               grading_error: winner.grading_error,
@@ -754,7 +758,7 @@ export default function abConductorExtension(pi: ExtensionAPI) {
                 ab: {
                   run_id: run.runId,
                   experiment_id: experiment.id,
-                  mode: experiment.mode,
+                  configured_winner_mode: experiment.winner_mode,
                   selection_source: "native_fallback",
                   fallback_native: true,
                   fallback_reason_code: "lane_orchestration_failed_native_fallback",

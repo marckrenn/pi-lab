@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createEditTool } from "@mariozechner/pi-coding-agent";
 import type { LoadedExperiment, LaneConfig, LaneRunRecord } from "./types.ts";
-import { resolveConfiguredPath } from "./config.ts";
+import { canonicalExecutionStrategy, resolveConfiguredPath } from "./config.ts";
 import type { RunContext } from "./storage.ts";
 import { extractFirstJsonObject, runCommand, safeJsonParse } from "./utils.ts";
 import {
@@ -59,6 +59,15 @@ async function getHeadSha(repoRoot: string, signal?: AbortSignal): Promise<strin
   return (await gitOutput(repoRoot, ["rev-parse", "HEAD"], signal)).trim();
 }
 
+function inferLaneHarnessForStrategy(executionStrategy: unknown): "direct" | "pi_prompt" {
+  return canonicalExecutionStrategy(executionStrategy) === "fixed_args" ? "direct" : "pi_prompt";
+}
+
+function resolveLaneHarness(executionStrategy: unknown): "direct" | "pi_prompt" {
+  const override = process.env.PI_AB_LANE_HARNESS?.toLowerCase();
+  if (override === "direct" || override === "pi_prompt") return override;
+  return inferLaneHarnessForStrategy(executionStrategy);
+}
 
 function newestSessionFile(dir: string): string | undefined {
   if (!existsSync(dir)) return undefined;
@@ -937,7 +946,7 @@ export async function runExperimentLanes(
 
   const keepDebugPanes = process.env.PI_AB_KEEP_PANES === "1";
   const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? experiment.debug_ui ?? "none").toLowerCase();
-  const requestedLaneHarness = (process.env.PI_AB_LANE_HARNESS ?? experiment.lane_harness ?? "direct").toLowerCase();
+  const requestedLaneHarness = resolveLaneHarness(experiment.execution_strategy);
 
   let useCmuxDebug =
     requestedLaneHarness === "pi_prompt" &&
@@ -1291,7 +1300,7 @@ export async function runExperimentLanesFixedArgsTool(
 
   const keepDebugPanes = process.env.PI_AB_KEEP_PANES === "1";
   const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? experiment.debug_ui ?? "none").toLowerCase();
-  const requestedLaneHarness = (process.env.PI_AB_LANE_HARNESS ?? experiment.lane_harness ?? "direct").toLowerCase();
+  const requestedLaneHarness = resolveLaneHarness(experiment.execution_strategy);
 
   let useCmuxDebug =
     requestedLaneHarness === "pi_prompt" &&

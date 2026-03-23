@@ -19,13 +19,29 @@ describe("config validation", () => {
     const result = validateExperimentConfig({
       id: "x",
       target_tool: "calculator",
-      trigger: { tool: "calculator", when_path_regex: "^src/" },
-      mode: "deterministic",
+      trigger: { when_path_regex: "^src/" },
+      winner_mode: "deterministic",
       execution_strategy: "lane_multi_call",
       lanes: [{ id: "A", extensions: ["./a.ts"] }],
     });
 
     expect(result.errors).toEqual([]);
     expect(result.warnings.some((w) => w.includes("when_path_regex"))).toBe(true);
+  });
+
+  test("rejects legacy fields mode and trigger.tool", () => {
+    const legacy = {
+      id: "legacy",
+      target_tool: "edit",
+      trigger: { tool: "edit" },
+      mode: "deterministic",
+      execution_strategy: "fixed_args",
+      lanes: [{ id: "A", extensions: ["./a.ts"] }],
+    } as any;
+
+    const result = validateExperimentConfig(legacy);
+    expect(result.errors.some((e) => e.includes("trigger.tool"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("winner_mode"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("mode is no longer supported"))).toBe(true);
   });
 });

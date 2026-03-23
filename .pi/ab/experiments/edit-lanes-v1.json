@@ -3,11 +3,9 @@
   "enabled": true,
   "target_tool": "edit",
   "trigger": {
-    "tool": "edit",
     "sample_rate": 1,
     "when_path_regex": "^fixtures/ab-test/"
   },
-  "mode": "deterministic",
   "execution_strategy": "fixed_args",
   "lanes": [
     {
@@ -34,7 +32,6 @@
   ],
   "timeout_ms": 15000,
   "debug": false,
-  "lane_harness": "direct",
   "selection": {
     "deterministic": {
       "objective": "min(latency_ms)",
@@ -55,5 +52,6 @@
     "on_grading_failure": "fallback_deterministic_then_shadow",
     "on_winner_apply_failure": "fallback_primary_then_fail",
     "all_lanes_failed": "fallback_primary"
-  }
+  },
+  "winner_mode": "deterministic"
 }

@@ -2,7 +2,6 @@ export type AbMode = "shadow" | "deterministic" | "grading" | "hybrid";
 export type ExecutionStrategy = "fixed_args" | "lane_single_call" | "lane_multi_call";
 
 export interface TriggerPolicy {
-  tool: string;
   sample_rate?: number;
   when_path_regex?: string;
   when_oldtext_min_chars?: number;
@@ -54,13 +53,12 @@ export interface AbExperiment {
   enabled?: boolean;
   target_tool: string;
   trigger: TriggerPolicy;
-  mode: AbMode;
+  winner_mode: AbMode;
   execution_strategy?: ExecutionStrategy;
   lanes: LaneConfig[];
   timeout_ms?: number;
   debug?: boolean;
   debug_ui?: "cmux" | "none";
-  lane_harness?: "direct" | "pi_prompt";
   selection?: {
     deterministic?: DeterministicSelection;
     grading?: GradingConfig;

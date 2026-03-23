@@ -23,7 +23,7 @@ Inside pi:
 ```text
 /ab wizard                     # interactive setup; writes experiment + grading prompt scaffold
 /ab status                     # list loaded experiments and source paths
-/ab validate                   # show config warnings/errors
+/ab validate                   # check config errors/warnings
 /ab gc --keep-last 10          # preview cleanup (dry-run)
 /ab gc --keep-last 10 --force  # execute cleanup
 ```
@@ -32,85 +32,46 @@ Inside pi:
 
 ## Stage 1: Intercept
 
-An experiment activates only when the incoming tool call matches its trigger policy.
+The tool call is matched by:
 
-### `target_tool` vs `trigger.tool`
+- `target_tool` (the tool name this experiment intercepts)
+- optional `trigger` gates:
+  - `sample_rate`
+  - `when_path_regex`
+  - `when_oldtext_min_chars`
+  - `cooldown_ms`
 
-- `target_tool`: the tool this experiment is designed to intercept and run across lanes.
-- `trigger.tool`: the tool name used by the trigger matcher.
-
-In current runtime behavior, these should be the same for a matching experiment. If they differ, validation warns and the experiment typically will not match.
-
-### Trigger gates
-
-| Field | Meaning |
-|---|---|
-| `sample_rate` | Probability gate (0..1) for whether the experiment runs on a call |
-| `when_path_regex` | Optional path regex gate (mostly useful for `fixed_args` flows with `args.path`) |
-| `when_oldtext_min_chars` | Optional minimum oldText length gate (edit-like flows) |
-| `cooldown_ms` | Minimum delay between runs of the same experiment |
-
-If no valid enabled experiment matches, the call proceeds normally.
+`trigger.tool` is intentionally removed. Tool routing is defined by `target_tool` only.
 
 ## Stage 2: Fork lanes
 
-Each lane runs in an isolated git worktree so lane side effects are fully separated from each other and from the main workspace.
+Each lane runs in an isolated git worktree. Lane side effects are sandboxed from each other and from the main workspace.
 
 ## Stage 3: Execute strategy
 
-| Strategy | What lanes receive | Typical harness | Protocol | Use case |
+| Strategy | Lane input | Typical harness | Protocol | Use case |
 |---|---|---|---|---|
-| `fixed_args` | Same intercepted args for all lanes | `direct` | Lane calls intercepted tool directly | Fast apples-to-apples implementation comparison |
+| `fixed_args` | Same intercepted args for all lanes | `direct` | Lane calls intercepted tool directly | Apples-to-apples implementation comparison |
 | `lane_single_call` | `{ task, context?, constraints? }` | `pi_prompt` | Exactly one target-tool call + `LANE_DONE` | One-call discipline with lane-specific argument schemas |
-| `lane_multi_call` | `{ task, context?, constraints? }` | `pi_prompt` | Multi-step lane flow with strict final JSON | Lane-level replanning and tool chaining for harder tasks |
+| `lane_multi_call` | `{ task, context?, constraints? }` | `pi_prompt` | Multi-step lane flow + strict final JSON | Lane-level replanning/tool chaining |
+
+`lane_harness` is inferred from strategy. Explicit config field is removed.
+(Advanced override remains available via `PI_AB_LANE_HARNESS=direct|pi_prompt`.)
 
 ## Stage 4: Score and select winner
 
-| Winner selection mode | Behavior | Use case |
+| Winner mode | Behavior | Use case |
 |---|---|---|
-| `shadow` | Keep primary lane output | Safety-first rollout/passive benchmarking |
+| `shadow` | **Always selects the primary lane** for mergeback | Safety-first rollout/passive benchmarking |
 | `deterministic` | Formula/tie-break ranking from measurable metrics | Low-cost, explainable selection |
-| `grading` | LLM grader decides winner (fallback policy if grading fails) | Quality-first semantic selection |
-| `hybrid` | Combine deterministic and grading signals | Balance objective metrics and semantic quality |
+| `grading` | LLM grading decides winner | Quality-first semantic selection |
+| `hybrid` | Combines deterministic and grading signals | Balance objective metrics + semantic quality |
 
-### LLM-only winner selection
+### Grading fallback policy
 
-Use `mode: "grading"` when winner selection should be decided by the LLM grader (with configured fallback on grader failure).
-
-### Why `selection.deterministic` and `selection.hybrid` are split
-
-They control different layers:
-
-- `selection.deterministic`: defines the baseline metric ranking (`objective` + `tie_breakers`).
-- `selection.hybrid`: defines how LLM grading is incorporated on top of that baseline.
-
-This keeps deterministic ranking reusable and explicit, and makes hybrid behavior configurable without redefining the whole base ranking model.
-
-#### Hybrid `llm_score` specifics
-
-For `mode: "hybrid"` + `selection.hybrid.mode: "llm_score"`, the final ranking can use:
-- `{llm_score}` (0..1 from grader)
-- `{deterministic_score}` (normalized deterministic rank)
-
-Example:
-
-```json
-{
-  "selection": {
-    "deterministic": {
-      "objective": "min({latency_ms} + {error} * 100000 + {timeout} * 100000)",
-      "tie_breakers": ["max(success)"]
-    },
-    "hybrid": {
-      "mode": "llm_score",
-      "deterministic_weight": 0.6,
-      "llm_weight": 0.4,
-      "final_objective": "max({deterministic_score} * 0.6 + {llm_score} * 0.4)",
-      "final_tie_breakers": ["max(llm_score)"]
-    }
-  }
-}
-```
+When grading fails (timeout, invalid schema, no usable winner, etc.), `failure_policy.on_grading_failure` controls fallback behavior:
+- `fallback_deterministic_then_shadow`
+- `fallback_shadow`
 
 ## Stage 5: Apply result
 
@@ -118,11 +79,11 @@ Winner patch/output is applied back to the main workspace (`git apply`, then `--
 
 ## Stage 6: Persist telemetry
 
-Artifacts are written under:
+Artifacts are written to:
 
 `~/.pi/agent/ab/runs/<project>/<run-id>/`
 
-Typical files:
+Common files:
 - `run.json`
 - `lanes/{id}.json`
 - `artifacts/grading-input.json`
@@ -130,45 +91,50 @@ Typical files:
 - `artifacts/grading-raw-output-*.md`
 - `lanes/<id>/target-before.md`
 - `lanes/<id>/target-after.md`
-- `sessions/...` (for prompt-based harness runs)
+- `sessions/...` (prompt harness runs)
 
 ---
 
-## Annotated experiment config (JSONC)
+## Config file UX (annotated JSONC)
+
+The schema is the same; this layout is grouped by intent for readability.
 
 ```jsonc
 {
-  "id": "edit-lanes-v1",                     // unique experiment id
+  // ─────────────────────────────────────────────────────────────
+  // Identity + routing
+  // ─────────────────────────────────────────────────────────────
+  "id": "edit-lanes-v1",
   "enabled": true,
+  "target_tool": "edit",
 
-  "target_tool": "edit",                     // tool intercepted and executed across lanes
+  // ─────────────────────────────────────────────────────────────
+  // Trigger gates (optional)
+  // ─────────────────────────────────────────────────────────────
   "trigger": {
-    "tool": "edit",                          // trigger matcher tool name (should match target_tool)
-    "sample_rate": 1,                          // 0..1 sampling gate
-    "when_path_regex": "^fixtures/ab-test/", // optional path filter
-    "when_oldtext_min_chars": 1,               // optional oldText-size filter
-    "cooldown_ms": 0                           // optional minimum interval between runs
+    "sample_rate": 1,
+    "when_path_regex": "^fixtures/ab-test/",
+    "when_oldtext_min_chars": 1,
+    "cooldown_ms": 0
   },
 
-  "mode": "deterministic",                   // shadow | deterministic | grading | hybrid
-  "execution_strategy": "fixed_args",        // fixed_args | lane_single_call | lane_multi_call
-
-  "lanes": [
-    { "id": "A", "primary": false, "extensions": ["./fixtures/ab-test/lanes/edit-perm-a.ts"] },
-    { "id": "B", "primary": true,  "extensions": ["./fixtures/ab-test/lanes/edit-perm-b.ts"] },
-    { "id": "C", "primary": false, "extensions": ["./fixtures/ab-test/lanes/edit-perm-c.ts"] }
-  ],
-
+  // ─────────────────────────────────────────────────────────────
+  // Execution
+  // ─────────────────────────────────────────────────────────────
+  "execution_strategy": "fixed_args", // fixed_args | lane_single_call | lane_multi_call
   "timeout_ms": 15000,
-  "lane_harness": "direct",                  // direct (fixed_args) or pi_prompt (proxy strategies)
 
+  // ─────────────────────────────────────────────────────────────
+  // Winner selection
+  // ─────────────────────────────────────────────────────────────
+  "winner_mode": "deterministic",     // shadow | deterministic | grading | hybrid
   "selection": {
     "deterministic": {
       "objective": "min({latency_ms} + {error} * 100000 + {timeout} * 100000)",
       "tie_breakers": ["max(success)", "min(total_tokens)"]
     },
     "hybrid": {
-      "mode": "llm_score",                   // llm_tiebreaker | llm_score
+      "mode": "llm_score",            // llm_tiebreaker | llm_score
       "deterministic_weight": 0.7,
       "llm_weight": 0.3,
       "final_objective": "max({deterministic_score} * 0.7 + {llm_score} * 0.3)",
@@ -176,47 +142,79 @@ Typical files:
     }
   },
 
+  // ─────────────────────────────────────────────────────────────
+  // Grading
+  // ─────────────────────────────────────────────────────────────
   "grading": {
     "execution": "process",
     "timeout_ms": 12000,
     "prompt_file": "./.pi/ab/prompts/grade-default.md",
-    "include": { "tool_calls": true }        // include lane_tool_calls in grading input
+    "include": { "tool_calls": true }
   },
 
+  // ─────────────────────────────────────────────────────────────
+  // Lanes
+  // ─────────────────────────────────────────────────────────────
+  "lanes": [
+    { "id": "A", "primary": false, "extensions": ["./fixtures/ab-test/lanes/edit-perm-a.ts"] },
+    { "id": "B", "primary": true,  "extensions": ["./fixtures/ab-test/lanes/edit-perm-b.ts"] },
+    { "id": "C", "primary": false, "extensions": ["./fixtures/ab-test/lanes/edit-perm-c.ts"] }
+  ],
+
+  // ─────────────────────────────────────────────────────────────
+  // Failure policy
+  // ─────────────────────────────────────────────────────────────
   "failure_policy": {
     "on_lane_timeout": "exclude_continue",
     "on_lane_crash": "exclude_continue",
     "on_grading_failure": "fallback_deterministic_then_shadow",
     "on_winner_apply_failure": "fallback_primary_then_fail",
     "all_lanes_failed": "fallback_primary"
-  }
+  },
+
+  // ─────────────────────────────────────────────────────────────
+  // Debug
+  // ─────────────────────────────────────────────────────────────
+  "debug": false,
+  "debug_ui": "none"
 }
 ```
 
+### Minimal mode snippets
+
+**LLM-only winner selection:**
+
+```json
+{ "winner_mode": "grading" }
+```
+
+**Shadow mode (always primary lane wins):**
+
+```json
+{ "winner_mode": "shadow" }
+```
+
+---
+
 ## Validation
 
-`/ab validate` reports configuration warnings/errors, including:
+`/ab validate` reports configuration warnings/errors.
+
+Examples:
 - unsupported `execution_strategy`
-- missing required fields (`target_tool`, `trigger.tool`, lanes)
-- mismatched `trigger.tool` vs `target_tool`
+- missing `target_tool` or `winner_mode`
+- legacy keys (`trigger.tool`, `mode`, `lane_harness`) in config
 - `when_path_regex` caveat for proxy strategies
 
 Invalid experiments are skipped at runtime.
-
-## Grading behavior
-
-- Grading runs in a separate `pi` process (`--no-extensions --no-skills ...`)
-- Grader output must be strict JSON and lane scores must be in `[0,1]`
-- One stricter retry is attempted on malformed grader output
-- Optional transcript enrichment via `grading.include.tool_calls: true`
 
 ## Debug controls
 
 Config:
 - `"debug": true|false`
-- `"debug_ui": "none" | "cmux"` (default `none`)
+- `"debug_ui": "none" | "cmux"`
 
-Env:
+Env overrides:
 
 ```bash
 PI_AB_DEBUG_UI=cmux
@@ -230,8 +228,8 @@ PI_AB_LANE_HARNESS=direct|pi_prompt
 - `pi-extension/ab/index.ts` — interception wiring and command registration
 - `pi-extension/ab/config.ts` — experiment loading, validation, matching
 - `pi-extension/ab/runner.ts` — lane execution/worktree handling
-- `pi-extension/ab/selection.ts` — deterministic ranking formula evaluation
-- `pi-extension/ab/winner.ts` — winner selection mode logic
+- `pi-extension/ab/selection.ts` — deterministic scoring/ranking
+- `pi-extension/ab/winner.ts` — winner mode logic
 - `pi-extension/ab/grading.ts` — grader process orchestration
 - `pi-extension/ab/wizard.ts` — setup wizard
 - `pi-extension/ab/gc.ts` — retention and cleanup

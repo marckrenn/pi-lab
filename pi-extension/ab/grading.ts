@@ -274,7 +274,7 @@ export async function runGradingProcess(
 
   const gradingInput: Record<string, unknown> = {
     experiment_id: loaded.experiment.id,
-    mode: loaded.experiment.mode,
+    winner_mode: loaded.experiment.winner_mode,
     intercepted_tool: args.intercepted_tool,
     intercepted_args: args.intercepted_args,
     lanes,

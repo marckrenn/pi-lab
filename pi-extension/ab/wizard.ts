@@ -30,13 +30,13 @@ export async function runAbWizard(
   if (!name) return { cancelled: true };
   const id = asId(name);
 
-  const modeChoice = await ctx.ui.select("Selection mode", ["deterministic", "shadow", "grading", "hybrid"]);
-  if (!modeChoice) return { cancelled: true };
+  const winnerModeChoice = await ctx.ui.select("Winner selection mode", ["deterministic", "shadow", "grading", "hybrid"]);
+  if (!winnerModeChoice) return { cancelled: true };
 
   let hybridModeChoice: "llm_tiebreaker" | "llm_score" = "llm_tiebreaker";
   let hybridDetWeight = 1;
   let hybridLlmWeight = 1;
-  if (modeChoice === "hybrid") {
+  if (winnerModeChoice === "hybrid") {
     const hm = await ctx.ui.select("Hybrid mode", ["llm_tiebreaker", "llm_score"]);
     if (!hm) return { cancelled: true };
     hybridModeChoice = hm as "llm_tiebreaker" | "llm_score";
@@ -90,11 +90,10 @@ export async function runAbWizard(
     enabled: true,
     target_tool: targetTool,
     trigger: {
-      tool: targetTool,
       sample_rate: Number.isFinite(sampleRate) ? Number(sampleRate.toFixed(2)) : 1,
       ...(regex ? { when_path_regex: regex } : {}),
     },
-    mode: modeChoice,
+    winner_mode: winnerModeChoice,
     execution_strategy: executionStrategyChoice,
     lanes: [
       { id: "A", primary: false, extensions: [laneA] },
@@ -103,13 +102,12 @@ export async function runAbWizard(
     ],
     timeout_ms: timeoutMs,
     debug: false,
-    lane_harness: executionStrategyChoice === "fixed_args" ? "direct" : "pi_prompt",
     selection: {
       deterministic: {
         objective: "min(latency_ms)",
         tie_breakers: ["max(success)", "min(total_tokens)"],
       },
-      ...(modeChoice === "hybrid"
+      ...(winnerModeChoice === "hybrid"
         ? {
             hybrid: {
               mode: hybridModeChoice,

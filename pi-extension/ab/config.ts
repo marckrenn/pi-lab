@@ -108,20 +108,35 @@ export function validateExperimentConfig(experiment: AbExperiment): { errors: st
     errors.push("target_tool is required.");
   }
 
-  if (!experiment.trigger?.tool || !experiment.trigger.tool.trim()) {
-    errors.push("trigger.tool is required.");
+  if (!experiment.winner_mode) {
+    errors.push("winner_mode is required.");
   }
 
-  if (experiment.trigger?.tool && experiment.target_tool && experiment.trigger.tool !== experiment.target_tool) {
-    warnings.push("trigger.tool differs from target_tool; experiment may never match.");
+  const winnerMode = experiment.winner_mode;
+  if (winnerMode !== "shadow" && winnerMode !== "deterministic" && winnerMode !== "grading" && winnerMode !== "hybrid") {
+    errors.push(`Unsupported winner_mode '${String(winnerMode)}'.`);
+  }
+
+  const rawTriggerTool = (experiment as any)?.trigger?.tool;
+  if (rawTriggerTool != null) {
+    errors.push("trigger.tool is no longer supported. Remove it and use target_tool only.");
+  }
+
+  const rawMode = (experiment as any)?.mode;
+  if (rawMode != null) {
+    errors.push("mode is no longer supported. Rename it to winner_mode.");
+  }
+
+  const rawLaneHarness = (experiment as any)?.lane_harness;
+  if (rawLaneHarness != null) {
+    errors.push("lane_harness is no longer supported in config. Harness is inferred from execution_strategy (env override still available).");
   }
 
   if (!Array.isArray(experiment.lanes) || experiment.lanes.length === 0) {
     errors.push("At least one lane is required.");
   }
 
-  const mode = experiment.mode;
-  if (mode === "hybrid") {
+  if (winnerMode === "hybrid") {
     const hm = experiment.selection?.hybrid?.mode ?? "llm_tiebreaker";
     if (hm !== "llm_tiebreaker" && hm !== "llm_score") {
       errors.push(`Unsupported hybrid.mode '${String(hm)}'.`);
@@ -139,7 +154,7 @@ export function validateExperimentConfig(experiment: AbExperiment): { errors: st
     warnings.push("when_path_regex usually has no effect for lane_single_call/lane_multi_call unless args include path.");
   }
 
-  if ((mode === "grading" || mode === "hybrid") && !experiment.grading?.prompt_file && !experiment.selection?.grading?.prompt_file) {
+  if ((winnerMode === "grading" || winnerMode === "hybrid") && !experiment.grading?.prompt_file && !experiment.selection?.grading?.prompt_file) {
     warnings.push("No grading.prompt_file configured; default grading prompt will be used.");
   }
 
@@ -165,7 +180,6 @@ export function selectExperimentForTool(
     .filter((e) => e.experiment.enabled !== false)
     .filter((e) => (e.validation?.errors?.length ?? 0) === 0)
     .filter((e) => e.experiment.target_tool === toolName)
-    .filter((e) => e.experiment.trigger?.tool === toolName)
     .filter((e) => !opts?.executionStrategy || canonicalExecutionStrategy(e.experiment.execution_strategy) === opts.executionStrategy);
 
   for (const loaded of experiments) {
@@ -218,7 +232,7 @@ export function formatExperimentSummary(loaded: LoadedExperiment): string {
       : (loaded.validation?.warnings?.length ?? 0) > 0
         ? " [warn]"
         : "";
-  return `${ex.id} (${loaded.source}, tool=${ex.target_tool}, mode=${ex.mode}, strategy=${strategy}, lanes=${ex.lanes.length}) from ${basename(loaded.path)}${validationBadge}`;
+  return `${ex.id} (${loaded.source}, tool=${ex.target_tool}, winner_mode=${ex.winner_mode}, strategy=${strategy}, lanes=${ex.lanes.length}) from ${basename(loaded.path)}${validationBadge}`;
 }
 
 export function resolveConfiguredPath(value: string, cwd: string, configPath?: string): string {
