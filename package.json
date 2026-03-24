@@ -38,13 +38,13 @@
   },
   "publishConfig": {
     "access": "public",
-    "tag": "alpha"
+    "provenance": true
   },
   "files": [
     "index.ts",
     "README.md",
     "LICENSE",
-    "pi-extension/ab/**",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "pi-extension/ab/**"
   ]
 }
