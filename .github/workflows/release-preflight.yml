@@ -1,0 +1,37 @@
+name: release-preflight
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  preflight:
+    name: Release preflight checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install packaged example dependencies
+        working-directory: examples/packaged-edit-experiment
+        run: npm ci
+
+      - name: Run release preflight checks
+        env:
+          RELEASE_DRY_RUN_REQUIRE_EXAMPLE_SMOKE: "1"
+        run: bash scripts/release-dry-run.sh
