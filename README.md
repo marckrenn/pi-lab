@@ -1,19 +1,20 @@
 # @marckrenn/pi-lab
 
-pi A/B conductor extension for running multiple lane variants behind one tool name, comparing them safely, and returning one selected result.
+`pi-lab` lets you run multiple **extension-backed lane bundles** behind one tool call, compare them safely in isolation, and proceed with one selected result.
 
 > **Warning**
-> This project is an **experimental alpha** and intentionally lightweight. It is **not production ready**.
-> Schema and runtime behavior may still change before `v1`.
->
-It is useful when you want to:
+> This project is an **experimental alpha**. It is **not production ready**, and schema/runtime behavior may still change before `v1`.
+
+> **Note**
+> If you find `pi-lab` useful, I'd be grateful for any contribution — whether that's feedback, code, docs, or GitHub Sponsors: <https://github.com/sponsors/marckrenn>
+
+Use it when you want to:
 - compare permutations of a tool or extension
-- try alternative lane extensions that carry different prompts, tools, or behavior
+- try alternative extension-backed lane bundles with different prompts, tools, or behavior
 - let a formula, an LLM, or both choose which lane to proceed with
 - keep a safe fallback lane while still collecting telemetry from alternatives
 
 A useful mental model:
-
 - this works at the **lane extension level** (`lane`)
 - each lane activates one or more extension files
 - those extensions can:
@@ -22,7 +23,7 @@ A useful mental model:
   - change tool-use behavior
   - do different planning in proxy modes
 
-So this is closer to comparing **lane permutations at the extension/tool-behavior level** than just swapping one function body.
+So `pi-lab` is closer to comparing **lane permutations at the extension/tool-behavior level** than just swapping one function body.
 
 ## When to use this
 
