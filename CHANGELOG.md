@@ -6,7 +6,7 @@ All notable changes to this project are documented here.
 
 ### Added
 - Renamed the package identity to `@marckrenn/pi-lab` and updated project metadata and examples to the new repository path.
-- Added release notes for `0.1.0-alpha.1` with guidance on the git-first preview install flow and optional npm fallback.
+- Added release notes for `0.1.0-alpha.1` with guidance on the git-first preview install flow.
 - Added a dedicated MIT license file (`LICENSE`).
 
 ### Major caveats

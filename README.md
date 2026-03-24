@@ -70,29 +70,15 @@ Inside pi:
 - [pi-lab extension flowchart](docs/pi-lab-extension-flow.svg)
 
 
-## Install (git-first, alpha preview)
+## Install (git-first preview)
 
-The first preview release is available as a public alpha and may change without notice:
+The current public-preview path is **git-first**.
+Nothing has been released to npm yet.
 
-- `0.1.0-alpha.1` - first public preview build
-- tagged with `alpha`
-
-### Install preview builds (git-first)
+### Install preview builds
 
 ```bash
 pi install git:github.com/marckrenn/pi-lab
-```
-
-### Optional npm fallback
-
-If your environment does not support git installs, you can use the npm preview as a fallback:
-
-```bash
-# latest preview (alpha tag)
-npm install @marckrenn/pi-lab@alpha
-
-# pin an exact preview version
-npm install @marckrenn/pi-lab@0.1.0-alpha.1
 ```
 
 > **Note**
