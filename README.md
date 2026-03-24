@@ -3,8 +3,7 @@
 pi A/B conductor extension for running multiple lane variants behind one tool name, comparing them safely, and returning one selected result.
 
 > **Warning**
-> This project is an early idea / toy prototype. It is **not production ready**. Expect breaking schema changes, rough edges, and missing operational features.
-
+> This project is an **experimental alpha** and intentionally lightweight. It is **not production ready**. Schema and runtime behavior may still change before `v1`.
 It is useful when you want to:
 - compare permutations of a tool or extension
 - try alternative lane extensions that carry different prompts, tools, or behavior
@@ -67,7 +66,11 @@ Inside pi:
 
 ## Flowchart
 
-- [pi-lab extension flowchart](docs/pi-lab-extension-flow.svg)
+The extension follows a deterministic path from interception → lane isolation → execution strategy → winner selection → artifact persistence.
+
+![pi-lab extension flowchart](docs/pi-lab-extension-flow.svg)
+
+- [Open as markdown-friendly link](docs/pi-lab-extension-flow.svg)
 
 
 ## Install (git-first preview)
@@ -75,7 +78,7 @@ Inside pi:
 The current public-preview path is **git-first**.
 Nothing has been released to npm yet.
 
-### Install preview builds
+### Install preview builds (git-first)
 
 ```bash
 pi install git:github.com/marckrenn/pi-lab
