@@ -5,8 +5,8 @@ All notable changes to this project are documented here.
 ## 0.1.0-alpha.1 - Public preview
 
 ### Added
-- Added release-grade documentation for the first public preview track.
-- Added release notes for `0.1.0-alpha.1` with guidance on npm preview consumption.
+- Renamed the package identity to `@marckrenn/pi-lab` (from `@marckrenn/pi-ab`) and updated project metadata and examples to the new repository path.
+- Added release notes for `0.1.0-alpha.1` with guidance on the git-first preview install flow and optional npm fallback.
 - Added a dedicated MIT license file (`LICENSE`).
 
 ### Major caveats

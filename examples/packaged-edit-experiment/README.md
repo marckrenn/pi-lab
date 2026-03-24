@@ -1,6 +1,6 @@
 # Packaged Edit Experiment Sample
 
-This is a small, self-contained sample that packages a pi-ab experiment as its own npm package.
+This is a small, self-contained sample that packages a pi-lab experiment as its own npm package.
 It demonstrates the JSON-only config + full-extension-bundle lane model.
 
 ## Layout
@@ -20,7 +20,7 @@ cd examples/packaged-edit-experiment
 npm install
 ```
 
-`npm install` wires the local root package via `"@marckrenn/pi-ab": "file:../.."`.
+`npm install` wires the local root package via `"@marckrenn/pi-lab": "file:../.."`.
 
 ## Run
 

@@ -2,7 +2,7 @@
   "name": "packaged-edit-experiment",
   "private": true,
   "version": "0.1.0",
-  "description": "Packaged pi-ab sample for a full-extension-bundle edit experiment.",
+  "description": "Packaged pi-lab sample for a full-extension-bundle edit experiment.",
   "keywords": ["pi-package", "pi-extension", "ab-testing"],
   "type": "module",
   "main": "index.ts",
@@ -12,7 +12,7 @@
     "smoke": "bash scripts/smoke.sh"
   },
   "dependencies": {
-    "@marckrenn/pi-ab": "file:../.."
+    "@marckrenn/pi-lab": "file:../.."
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*"

@@ -55,7 +55,7 @@ export interface AbExtensionOptions {
   experimentDirs?: string[];
   /**
    * Optional base directory (absolute path or file:// URL) used to resolve relative experimentDirs.
-   * If omitted, pi-ab will attempt to infer the caller extension directory from stack traces.
+   * If omitted, pi-lab will attempt to infer the caller extension directory from stack traces.
    */
   baseDir?: string;
 }

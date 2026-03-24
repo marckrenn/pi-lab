@@ -1,4 +1,4 @@
-import { createAbExtension } from "@marckrenn/pi-ab";
+import { createAbExtension } from "@marckrenn/pi-lab";
 
 export default createAbExtension({
   experimentDirs: ["./experiments"],

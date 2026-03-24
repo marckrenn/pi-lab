@@ -14,7 +14,7 @@ describe("direct lane harness extension compatibility checks", () => {
   const tmpRoots: string[] = [];
 
   const createTempDir = () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-ab-runner-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "pi-lab-runner-test-"));
     tmpRoots.push(dir);
     return dir;
   };

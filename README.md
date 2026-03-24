@@ -1,4 +1,4 @@
-# @marckrenn/pi-ab
+# @marckrenn/pi-lab
 
 pi A/B conductor extension for running multiple lane variants behind one tool name, comparing them safely, and returning one selected result.
 
@@ -41,17 +41,17 @@ This is probably overkill if:
 
 ## What it does
 
-- [Stage 1: Intercept](#stage-1-intercept) — decides whether an incoming tool call should become an experiment run.
-- [Stage 2: Fork lanes](#stage-2-fork-lanes) — creates isolated workspaces so each lane runs independently.
-- [Stage 3: Execute strategy](#stage-3-execute-strategy) — runs lanes using the execution style that fits the tool/task shape.
-- [Stage 4: Choose winner](#stage-4-choose-winner) — picks the winner using a hardcoded lane, a formula, an LLM, or a blend.
-- [Stage 5: Apply result](#stage-5-apply-result) — merges the winning patch/output back when applicable.
-- [Stage 6: Persist telemetry](#stage-6-persist-telemetry) — writes run, lane, LLM, and fallback artifacts for later inspection.
+- [Stage 1: Intercept](#stage-1-intercept) - decides whether an incoming tool call should become an experiment run.
+- [Stage 2: Fork lanes](#stage-2-fork-lanes) - creates isolated workspaces so each lane runs independently.
+- [Stage 3: Execute strategy](#stage-3-execute-strategy) - runs lanes using the execution style that fits the tool/task shape.
+- [Stage 4: Choose winner](#stage-4-choose-winner) - picks the winner using a hardcoded lane, a formula, an LLM, or a blend.
+- [Stage 5: Apply result](#stage-5-apply-result) - merges the winning patch/output back when applicable.
+- [Stage 6: Persist telemetry](#stage-6-persist-telemetry) - writes run, lane, LLM, and fallback artifacts for later inspection.
 
 ## Quick start
 
 ```bash
-cd /Users/marckrenn/Documents/projects/pi-ab-wip
+cd /Users/marckrenn/Documents/projects/pi-lab
 pi -e ./pi-extension/ab/index.ts
 ```
 
@@ -65,39 +65,40 @@ Inside pi:
 /ab gc --keep-last 10 --force  # actually delete old run folders, keeping the newest 10
 ```
 
-## Install and publish (npm preview)
+## Flowchart
 
-The first preview release is published to npm as a pre-release channel:
+- [pi-lab extension flowchart](docs/pi-lab-extension-flow.svg)
 
-- `0.1.0-alpha.1` — first public preview build
+
+## Install (git-first, alpha preview)
+
+The first preview release is available as a public alpha and may change without notice:
+
+- `0.1.0-alpha.1` - first public preview build
 - tagged with `alpha`
 
-### Install preview builds
+### Install preview builds (git-first)
+
+```bash
+pi install git:github.com/marckrenn/pi-lab
+```
+
+### Optional npm fallback
+
+If your environment does not support git installs, you can use the npm preview as a fallback:
 
 ```bash
 # latest preview (alpha tag)
-npm install @marckrenn/pi-ab@alpha
+npm install @marckrenn/pi-lab@alpha
 
 # pin an exact preview version
-npm install @marckrenn/pi-ab@0.1.0-alpha.1
+npm install @marckrenn/pi-lab@0.1.0-alpha.1
 ```
 
 > **Note**
+> This is a **public preview alpha**.
 > This package is intended for pi extension/runtime consumption (TypeScript entrypoints loaded by pi).
 > It is not aimed at generic Node.js imports in plain JS runtimes without TS loader support.
-
-### Publish a preview release
-
-Maintainer prerequisites before publish:
-- npm account has publish rights for `@marckrenn/pi-ab`
-- npm auth is active (`npm whoami` works)
-- 2FA/provenance requirements are satisfied in your npm org/account settings
-
-```bash
-# run this as package maintainer only
-npm version 0.1.0-alpha.1 --no-git-tag-version
-npm publish --tag alpha --access public
-```
 
 ### Release caveats (alpha)
 
@@ -147,7 +148,7 @@ This extension is now **JSON-only** for experiment config.
 
 ### Reusable runtime package model
 
-`@marckrenn/pi-ab` is designed to be used as a shared runtime dependency.
+`@marckrenn/pi-lab` is designed to be used as a shared runtime dependency.
 
 In your experiment package, add your own experiment JSON and lane assets:
 
@@ -163,7 +164,7 @@ Then register the experiment set in your package entry extension:
 
 ```ts
 // your-experiment-pkg/index.ts
-import { createAbExtension } from "@marckrenn/pi-ab";
+import { createAbExtension } from "@marckrenn/pi-lab";
 
 export default createAbExtension({
   experimentDirs: ["./experiments"],
@@ -181,7 +182,7 @@ export default createAbExtension({
 
 ```ts
 // Equivalent "no-options" form using the package default export
-import abExtension from "@marckrenn/pi-ab";
+import abExtension from "@marckrenn/pi-lab";
 
 export default abExtension;
 ```
@@ -339,7 +340,7 @@ That gives you:
 
 ## Stage 4: Choose winner
 
-### What “winner” means
+### What "winner" means
 
 In plain words:
 1. **Grade** each lane result (by formula, LLM, or both).
@@ -459,7 +460,7 @@ Common files:
 ```
 
 Notes:
-- omitting `trigger` means “eligible for every call to `tool.name`”
+- omitting `trigger` means "eligible for every call to `tool.name`"
 - omitting `execution` defaults to `fixed_args`
 - omitting `winner.formula.objective` defaults to `min(latency_ms)`
 - if no lane is marked `baseline`, the first lane becomes baseline automatically
@@ -656,11 +657,11 @@ Lane records in `lanes/{id}.json` include additional fallback visibility fields:
 
 ## First 5 things to inspect when a run behaves weirdly
 
-1. `run.json` — winner decision, fallback, and top-level path
-2. `lanes/{id}.json` — per-lane status, latency, protocol errors, patch info
-3. `artifacts/grading-output.json` — what the LLM judge returned
-4. `artifacts/grading-raw-output-*.md` — raw grader stdout/stderr when LLM judging failed
-5. `sessions/...` — lane transcripts for prompt-based strategies
+1. `run.json` - winner decision, fallback, and top-level path
+2. `lanes/{id}.json` - per-lane status, latency, protocol errors, patch info
+3. `artifacts/grading-output.json` - what the LLM judge returned
+4. `artifacts/grading-raw-output-*.md` - raw grader stdout/stderr when LLM judging failed
+5. `sessions/...` - lane transcripts for prompt-based strategies
 
 ## Validation
 
@@ -705,18 +706,18 @@ This project is intentionally early-stage. Important missing pieces include:
 If you want to contribute ideas, open an issue/PR with:
 - your use case,
 - what broke or felt confusing,
-- and what signal you needed but couldn’t get.
+- and what signal you needed but couldn't get.
 
 ## Project files
 
-- `pi-extension/ab/index.ts` — interception wiring and command registration
-- `pi-extension/ab/config.ts` — experiment loading, normalization, validation, matching
-- `pi-extension/ab/runner.ts` — lane execution/worktree handling
-- `pi-extension/ab/selection.ts` — formula scoring/ranking
-- `pi-extension/ab/winner.ts` — winner logic
-- `pi-extension/ab/grading.ts` — LLM judge process orchestration
-- `pi-extension/ab/wizard.ts` — setup wizard
-- `pi-extension/ab/gc.ts` — retention and cleanup
+- `pi-extension/ab/index.ts` - interception wiring and command registration
+- `pi-extension/ab/config.ts` - experiment loading, normalization, validation, matching
+- `pi-extension/ab/runner.ts` - lane execution/worktree handling
+- `pi-extension/ab/selection.ts` - formula scoring/ranking
+- `pi-extension/ab/winner.ts` - winner logic
+- `pi-extension/ab/grading.ts` - LLM judge process orchestration
+- `pi-extension/ab/wizard.ts` - setup wizard
+- `pi-extension/ab/gc.ts` - retention and cleanup
 
 ## Local checks
 

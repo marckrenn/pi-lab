@@ -1,5 +1,5 @@
 {
-  "name": "@marckrenn/pi-ab",
+  "name": "@marckrenn/pi-lab",
   "version": "0.1.0-alpha.1",
   "private": false,
   "type": "module",
@@ -28,13 +28,13 @@
   },
   "license": "MIT",
   "author": "Marc Krenn <mail@marckrenn.dev>",
-  "homepage": "https://github.com/marckrenn/pi-ab-wip",
+  "homepage": "https://github.com/marckrenn/pi-lab",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/marckrenn/pi-ab-wip.git"
+    "url": "git+https://github.com/marckrenn/pi-lab.git"
   },
   "bugs": {
-    "url": "https://github.com/marckrenn/pi-ab-wip/issues"
+    "url": "https://github.com/marckrenn/pi-lab/issues"
   },
   "publishConfig": {
     "access": "public",
