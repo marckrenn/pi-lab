@@ -140,6 +140,12 @@ run_dry_run_checks() {
   log "Pack metadata checks passed: $dry_name@$dry_version"
 }
 
+run_publish_dry_run() {
+  log "Running npm publish --dry-run --tag alpha"
+  npm publish --dry-run --tag alpha --access public >/dev/null || fail "npm publish --dry-run failed."
+  log "Publish dry-run check passed"
+}
+
 run_example_smoke() {
   local require_smoke="${RELEASE_DRY_RUN_REQUIRE_EXAMPLE_SMOKE:-0}"
 
@@ -177,6 +183,7 @@ main() {
   npm run typecheck
   npm test
   run_example_smoke
+  run_publish_dry_run
 
   log "Release dry-run checks passed"
 }

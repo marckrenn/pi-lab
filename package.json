@@ -1,22 +1,50 @@
 {
   "name": "@marckrenn/pi-ab",
-  "version": "0.0.1",
-  "private": true,
+  "version": "0.1.0-alpha.1",
+  "private": false,
   "type": "module",
   "main": "index.ts",
   "exports": "./index.ts",
-  "keywords": ["pi-package", "pi-extension", "ab-testing"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "ab-testing"
+  ],
   "description": "pi A/B extension runner for lane-level experiments.",
   "scripts": {
     "typecheck": "bun -e \"await import('./pi-extension/ab/index.ts'); await import('./pi-extension/ab/config.ts'); await import('./pi-extension/ab/runner.ts'); await import('./pi-extension/ab/grading.ts'); await import('./pi-extension/ab/selection.ts'); await import('./pi-extension/ab/winner.ts'); await import('./pi-extension/ab/wizard.ts'); console.log('typecheck-ok')\"",
     "test": "bun test ./tests",
-    "release:dry-run": "bash scripts/release-dry-run.sh"
+    "release:dry-run": "bash scripts/release-dry-run.sh",
+    "release:publish:alpha": "npm publish --tag alpha --access public"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@sinclair/typebox": "*"
   },
   "pi": {
-    "extensions": ["./pi-extension/ab/index.ts"]
-  }
+    "extensions": [
+      "./pi-extension/ab/index.ts"
+    ]
+  },
+  "license": "MIT",
+  "author": "Marc Krenn <mail@marckrenn.dev>",
+  "homepage": "https://github.com/marckrenn/pi-ab-wip",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marckrenn/pi-ab-wip.git"
+  },
+  "bugs": {
+    "url": "https://github.com/marckrenn/pi-ab-wip/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE",
+    "pi-extension/ab/**",
+    "CHANGELOG.md"
+  ]
 }

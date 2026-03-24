@@ -65,7 +65,49 @@ Inside pi:
 /ab gc --keep-last 10 --force  # actually delete old run folders, keeping the newest 10
 ```
 
-### What `/ab gc` does
+## Install and publish (npm preview)
+
+The first preview release is published to npm as a pre-release channel:
+
+- `0.1.0-alpha.1` — first public preview build
+- tagged with `alpha`
+
+### Install preview builds
+
+```bash
+# latest preview (alpha tag)
+npm install @marckrenn/pi-ab@alpha
+
+# pin an exact preview version
+npm install @marckrenn/pi-ab@0.1.0-alpha.1
+```
+
+### Publish a preview release
+
+```bash
+# run this as package maintainer only
+npm version 0.1.0-alpha.1 --no-git-tag-version
+npm publish --tag alpha --access public
+```
+
+### Release caveats (alpha)
+
+This is a **public preview** with intentional caveats:
+
+- APIs, config shapes, and artifact formats are still stabilizing and may change before v1.
+- There is no enterprise-grade policy engine or remote governance for rollout controls.
+- Multi-lane runs intentionally trade throughput and cost for experimental confidence.
+
+### Security / access warning
+
+> This package executes user-provided lane extensions locally (they are loaded and run in your process/workspace).
+> Only install/point to repositories and lane sets you fully trust.
+
+- Never run this in an environment that cannot tolerate arbitrary local extension execution.
+- Keep run artifacts and `~/.pi/agent/ab` directories scoped to trusted users.
+- If you publish experiments or lane code for others, review access controls and rotate tokens used by grader LLM calls.
+
+## What `/ab gc` does
 
 A/B runs accumulate under:
 
