@@ -35,11 +35,11 @@ NODE
 
 run_count_before=$(run_json_list | wc -l | tr -d '[:space:]')
 
-status_output="$(pi -e . --no-session --mode json '/ab status' 2>&1 || true)"
+status_output="$(pi -e . --no-session --mode json '/lab status' 2>&1 || true)"
 if ! printf '%s\n' "$status_output" | rg -q 'edit-fast'; then
   # Fallback for environments where slash-command output is not surfaced in JSON mode.
   if [ ! -f "package.json" ] || [ ! -f "experiments/edit-fast.json" ]; then
-    echo "Smoke failed: cannot validate /ab status visibility and package wiring is missing." >&2
+    echo "Smoke failed: cannot validate /lab status visibility and package wiring is missing." >&2
     echo "Status output was:\n$status_output" >&2
     exit 1
   fi

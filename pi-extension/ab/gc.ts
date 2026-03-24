@@ -98,7 +98,7 @@ export function runAbGcCommand(args: string, cwd: string): AbGcResult {
     return {
       level: "info",
       message:
-        "Usage: /ab gc [--keep-last N] [--older-than 7d] [--project NAME | --all-projects] [--force]\n" +
+        "Usage: /lab gc [--keep-last N] [--older-than 7d] [--project NAME | --all-projects] [--force]\n" +
         "Default is dry-run (no deletion). Add --force to delete.",
     };
   }

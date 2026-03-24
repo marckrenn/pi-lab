@@ -624,8 +624,8 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
     }
   });
 
-  pi.registerCommand("ab", {
-    description: "A/B conductor controls: /ab wizard | status | validate | gc",
+  pi.registerCommand("lab", {
+    description: "pi-lab controls: /lab wizard | status | validate | gc",
     handler: async (args, ctx) => {
       const cmd = (args ?? "").trim();
 
@@ -669,13 +669,13 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
         return;
       }
 
-      ctx.ui.notify("Usage: /ab wizard | status | validate | gc", "warning");
+      ctx.ui.notify("Usage: /lab wizard | status | validate | gc", "warning");
     },
   });
 
   pi.registerTool({
-    name: "ab_setup_wizard",
-    label: "A/B Setup Wizard",
+    name: "lab_setup_wizard",
+    label: "pi-lab Setup Wizard",
     description: "Interactive wizard to create an experiment JSON config (global or project scope).",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, ctx) {

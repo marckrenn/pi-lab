@@ -60,11 +60,11 @@ pi -e ./pi-extension/ab/index.ts
 Inside pi:
 
 ```text
-/ab wizard                     # create a new experiment config interactively
-/ab status                     # show loaded experiments and where they came from
-/ab validate                   # show config errors/warnings before you run anything
-/ab gc --keep-last 10          # dry-run: show which old run folders would be deleted
-/ab gc --keep-last 10 --force  # actually delete old run folders, keeping the newest 10
+/lab wizard                     # create a new experiment config interactively
+/lab status                     # show loaded experiments and where they came from
+/lab validate                   # show config errors/warnings before you run anything
+/lab gc --keep-last 10          # dry-run: show which old run folders would be deleted
+/lab gc --keep-last 10 --force  # actually delete old run folders, keeping the newest 10
 ```
 
 ## Flowchart
@@ -109,13 +109,13 @@ This is a **public preview** with intentional caveats:
 - Keep run artifacts and `~/.pi/agent/ab` directories scoped to trusted users.
 - If you publish experiments or lane code for others, review access controls and rotate tokens used by grader LLM calls.
 
-## What `/ab gc` does
+## What `/lab gc` does
 
 A/B runs accumulate under:
 
 `~/.pi/agent/ab/runs/<project>/<run-id>/`
 
-`/ab gc` is just garbage collection for those run artifacts.
+`/lab gc` is just garbage collection for those run artifacts.
 
 - by default it works on the **current project**
 - `--keep-last 10` protects the 10 newest runs and targets older ones
@@ -271,7 +271,7 @@ Relative lane/config paths are resolved first against the current project cwd (i
 
 ### Wizard flow
 
-`/ab wizard` asks in user-facing order:
+`/lab wizard` asks in user-facing order:
 1. scope + experiment id
 2. target tool
 3. execution strategy
@@ -657,7 +657,7 @@ Lane records in `lanes/{id}.json` include additional fallback visibility fields:
 
 ## Validation
 
-`/ab validate` reports configuration warnings/errors.
+`/lab validate` reports configuration warnings/errors.
 
 Examples:
 - unsupported `execution.strategy`
