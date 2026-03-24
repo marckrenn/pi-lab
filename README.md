@@ -82,7 +82,16 @@ npm install @marckrenn/pi-ab@alpha
 npm install @marckrenn/pi-ab@0.1.0-alpha.1
 ```
 
+> **Note**
+> This package is intended for pi extension/runtime consumption (TypeScript entrypoints loaded by pi).
+> It is not aimed at generic Node.js imports in plain JS runtimes without TS loader support.
+
 ### Publish a preview release
+
+Maintainer prerequisites before publish:
+- npm account has publish rights for `@marckrenn/pi-ab`
+- npm auth is active (`npm whoami` works)
+- 2FA/provenance requirements are satisfied in your npm org/account settings
 
 ```bash
 # run this as package maintainer only
