@@ -3,7 +3,9 @@
 pi A/B conductor extension for running multiple lane variants behind one tool name, comparing them safely, and returning one selected result.
 
 > **Warning**
-> This project is an **experimental alpha** and intentionally lightweight. It is **not production ready**. Schema and runtime behavior may still change before `v1`.
+> This project is an **experimental alpha** and intentionally lightweight. It is **not production ready**.
+> Schema and runtime behavior may still change before `v1`.
+>
 It is useful when you want to:
 - compare permutations of a tool or extension
 - try alternative lane extensions that carry different prompts, tools, or behavior
