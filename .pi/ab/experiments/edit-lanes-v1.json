@@ -1,6 +1,6 @@
 {
   "id": "edit-lanes-v1",
-  "enabled": true,
+  "enabled": false,
   "tool": {
     "name": "edit"
   },

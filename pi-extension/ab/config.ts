@@ -58,6 +58,7 @@ function normalizeLanes(rawLanes: unknown): LaneConfig[] {
       id,
       label: typeof rawLane?.label === "string" && rawLane.label.trim() ? rawLane.label.trim() : id,
       baseline: rawLane?.baseline === true,
+      model: typeof rawLane?.model === "string" && rawLane.model.trim() ? rawLane.model.trim() : undefined,
       extensions: Array.isArray(rawLane?.extensions) ? rawLane.extensions.filter((v: unknown) => typeof v === "string") : [],
     } satisfies LaneConfig;
   });
@@ -90,6 +91,11 @@ function normalizeExperiment(raw: any): AbExperiment {
     enabled: raw?.enabled,
     tool: {
       name: typeof raw?.tool?.name === "string" ? raw.tool.name : "",
+      description: typeof raw?.tool?.description === "string" ? raw.tool.description : undefined,
+      parameters_schema:
+        raw?.tool?.parameters_schema && typeof raw.tool.parameters_schema === "object"
+          ? raw.tool.parameters_schema
+          : undefined,
     },
     trigger: raw?.trigger && typeof raw.trigger === "object" ? {
       sample_rate: raw.trigger.sample_rate,
@@ -159,7 +165,7 @@ function collectExtraExperimentFiles(cwd: string, dirs?: string[]): ExtraExperim
 }
 
 export function getGlobalExperimentsDir(): string {
-  return join(homedir(), ".pi", "agent", "ab", "experiments");
+  return join(homedir(), ".pi", "agent", "lab", "experiments");
 }
 
 export function getProjectExperimentsDir(cwd: string): string {
@@ -328,6 +334,9 @@ export function validateExperimentConfig(experiment: AbExperiment, _path?: strin
     }
     if (laneIds.has(lane.id)) errors.push(`Duplicate lane id '${lane.id}'.`);
     laneIds.add(lane.id);
+    if (lane.model != null && (typeof lane.model !== "string" || !lane.model.trim())) {
+      errors.push(`Lane '${lane.id}' model must be a non-empty string when provided.`);
+    }
     if (!Array.isArray(lane.extensions) || lane.extensions.length === 0) {
       errors.push(`Lane '${lane.id}' must have at least one extension.`);
     }

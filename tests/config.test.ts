@@ -120,6 +120,28 @@ describe("config loading", () => {
     expect(result.errors.some((e) => e.includes("valid regular expression"))).toBe(true);
   });
 
+  test("loads optional lane model overrides", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "ab-config-model-"));
+    const dir = join(cwd, ".pi", "ab", "experiments");
+    mkdirSync(dir, { recursive: true });
+
+    writeFileSync(
+      join(dir, "model.json"),
+      JSON.stringify({
+        id: "model-test",
+        tool: { name: "planner" },
+        execution: { strategy: "lane_multi_call" },
+        winner: { mode: "formula" },
+        lanes: [{ id: "A", baseline: true, model: "openai/gpt-5", extensions: ["./a.ts"] }],
+      }),
+    );
+
+    const loaded = loadExperiments(cwd);
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].experiment.lanes[0]?.model).toBe("openai/gpt-5");
+    expect(loaded[0].validation?.errors ?? []).toEqual([]);
+  });
+
   test("rejects legacy fields after load normalization", () => {
     const cwd = mkdtempSync(join(tmpdir(), "ab-config-"));
     const dir = join(cwd, ".pi", "ab", "experiments");

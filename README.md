@@ -57,10 +57,18 @@ cd /Users/marckrenn/Documents/projects/pi-lab
 pi -e ./pi-extension/ab/index.ts
 ```
 
+## Git requirement
+
+`pi-lab` uses **git worktrees** for normal multi-lane execution.
+
+That means:
+- for full lane isolation, run it inside a **git repository**
+- if you call it outside a git repo, `pi-lab` now **falls back to the baseline lane only** and records that fallback in telemetry
+- global runtime data now lives under `~/.pi/agent/lab/`
+
 Inside pi:
 
 ```text
-/lab wizard                     # create a new experiment config interactively
 /lab status                     # show loaded experiments and where they came from
 /lab validate                   # show config errors/warnings before you run anything
 /lab gc --keep-last 10          # dry-run: show which old run folders would be deleted
@@ -106,14 +114,14 @@ This is a **public preview** with intentional caveats:
 > Only install/point to repositories and lane sets you fully trust.
 
 - Never run this in an environment that cannot tolerate arbitrary local extension execution.
-- Keep run artifacts and `~/.pi/agent/ab` directories scoped to trusted users.
+- Keep run artifacts and `~/.pi/agent/lab` directories scoped to trusted users.
 - If you publish experiments or lane code for others, review access controls and rotate tokens used by grader LLM calls.
 
 ## What `/lab gc` does
 
 A/B runs accumulate under:
 
-`~/.pi/agent/ab/runs/<project>/<run-id>/`
+`~/.pi/agent/lab/runs/<project>/<run-id>/`
 
 `/lab gc` is just garbage collection for those run artifacts.
 
@@ -131,7 +139,7 @@ A/B runs accumulate under:
 Experiment config files live in:
 
 - **project-local**: `.pi/ab/experiments/*.json`
-- **global**: `~/.pi/agent/ab/experiments/*.json`
+- **global**: `~/.pi/agent/lab/experiments/*.json`
 
 This extension is now **JSON-only** for experiment config.
 
@@ -227,6 +235,7 @@ Example experiment file from that package:
 A lane in this package is an **ordered extension bundle**:
 - `lanes[n].extensions` can include one or more extension modules.
 - each module must default-export a function like `export default (pi) => { ... }`.
+- `lanes[n].model` is optional. When set, that lane runs with that Pi model override. When omitted, `lane_single_call` / `lane_multi_call` inherit the main session model.
 - all files needed by a lane should live in the same package and be read explicitly.
 - files are loaded into an isolated worktree in array order.
 - for `fixed_args`, each lane must expose the target tool directly (for `edit`, the default edit tool is injected automatically).
@@ -259,7 +268,7 @@ Relative lane/config paths are resolved first against the current project cwd (i
 ### Runtime guarantees
 
 - a matching experiment config is selected by `tool.name`, strategy, and trigger gates.
-- all selected lanes are run and produce per-lane telemetry in `~/.pi/agent/ab/runs/...`.
+- when the cwd is inside a git repo, all selected lanes are run and produce per-lane telemetry in `~/.pi/agent/lab/runs/...`.
 - only one winner lane is selected and applied (or fallback policy is applied).
 - `fixed_args` prefers direct lane execution for speed; if it fails or is overridden, runtime falls back to prompt-based execution.
 - fallback decisions are explicit in telemetry: `run.json` includes `winner_mode`, `selection_source`, and `fallback_reason_code`; lane records include `lane_harness_requested`, `lane_harness_used`, and `lane_harness_fallback_reason`.
@@ -268,18 +277,6 @@ Relative lane/config paths are resolved first against the current project cwd (i
 
 - this project intentionally does not promise cross-run telemetry aggregation, cloud dashboards, or remote policy rollout controls.
 - grading quality, semantic correctness, and model-level policy are controlled by your prompt/config, not by the harness.
-
-### Wizard flow
-
-`/lab wizard` asks in user-facing order:
-1. scope + experiment id
-2. target tool
-3. execution strategy
-4. trigger gates
-5. timeout
-6. how the winner should be chosen
-7. LLM options (only when needed)
-8. lane paths + baseline lane + hardcoded winner lane (if needed)
 
 ---
 
@@ -302,21 +299,33 @@ If you omit `trigger`, the experiment is eligible for every call to `tool.name`.
 
 ## Stage 2: Fork lanes
 
-Each lane runs in an isolated git worktree.
+Each lane runs in an isolated git worktree when the current project is inside a git repo.
 
 That gives you:
 - no cross-lane file contamination
 - safer experimentation with write/edit tools
 - reproducible per-lane artifacts
 
+If the cwd is **not** inside a git repo, `pi-lab` skips multi-lane worktrees and runs only the **baseline lane** in-place as a documented fallback.
+
 ## Stage 3: Execute strategy
 
 ### Which strategy should I use?
 
+Before choosing a strategy, inspect the target tool / extension interface you want to compare.
+
+Ask these questions in order:
+1. **Do all lanes accept the exact same argument shape for the call we want to compare?**
+   - If yes, use `fixed_args`.
+2. **If not, are we still comparing permutations of a single tool call?**
+   - If yes, use `lane_single_call`.
+3. **Or are we comparing a more complex flow with planning or multiple tool steps?**
+   - Then use `lane_multi_call`.
+
 | If your situation is... | All lanes share same arguments? | Use |
 |---|:---:|---|
-| All lanes expose the same tool shape and accept the same args | ✅ | `fixed_args` |
-| Lanes should each make exactly one target-tool call | ❌ | `lane_single_call` |
+| You want to replay the exact same intercepted call into every lane | ✅ | `fixed_args` |
+| Lanes use different argument shapes, but you still want to compare specific permutations of one tool call | ❌ | `lane_single_call` |
 | Lanes may need lane-specific replanning or tool chaining | ❌ | `lane_multi_call` |
 
 ### Strategy details
@@ -328,7 +337,12 @@ That gives you:
 | `lane_multi_call` | `{ task, context?, constraints? }` | Multi-step lane flow + strict final JSON | Best when lane extensions need their own planning or tool chaining |
 
 > **Tip**
-> If you are unsure, start with `fixed_args`. It is the simplest model and usually the easiest one to debug.
+> Do **not** default to `fixed_args` just because it is simpler.
+>
+> The setup agent should first inspect the arguments accepted by the tool/lane implementations being compared.
+> - Use `fixed_args` **only if every lane can take the exact same arguments** for the compared call.
+> - Use `lane_single_call` if lanes need different argument shapes but you are still comparing one intentional tool call.
+> - Use `lane_multi_call` when the thing being compared is a broader flow, not just one call signature.
 
 ## Stage 4: Choose winner
 
@@ -420,9 +434,12 @@ Apply flow:
 
 Artifacts are written to:
 
-`~/.pi/agent/ab/runs/<project>/<run-id>/`
+`~/.pi/agent/lab/runs/<project>/<run-id>/`
 
-Common files:
+Project-level aggregate log:
+- `~/.pi/agent/lab/runs/<project>/runs.jsonl` - append-only JSONL stream of run-manifest and lane-record events across all runs for that project
+
+Common run files:
 - `run.json`
 - `lanes/{id}.json`
 - `artifacts/grading-input.json`
@@ -437,6 +454,8 @@ Common files:
 ## Config examples
 
 ### Smallest valid config
+
+Lane model override syntax matches `pi-interactive-subagents`: use an optional `model` string directly on the lane object.
 
 ```json
 {
@@ -501,6 +520,28 @@ Notes:
   ]
 }
 ```
+
+### Lane model override
+
+```jsonc
+{
+  "id": "planner-ab",
+  "tool": { "name": "planner" },
+  "execution": { "strategy": "lane_multi_call" },
+  "winner": { "mode": "formula" },
+  "lanes": [
+    { "label": "baseline", "baseline": true, "extensions": ["./lanes/a.ts"] },
+    { "label": "fast", "model": "openai/gpt-5-mini", "extensions": ["./lanes/b.ts"] },
+    { "label": "deep", "model": "anthropic/claude-sonnet-4-6", "extensions": ["./lanes/c.ts"] }
+  ]
+}
+```
+
+Notes:
+- `model` uses the same string syntax as Pi / `pi-interactive-subagents`.
+- use any normal Pi model id here, for example `openai/gpt-5`, `openai/gpt-5-mini`, or `anthropic/claude-sonnet-4-6`.
+- if omitted, `lane_single_call` and `lane_multi_call` inherit the current main-session model.
+- if set, the lane runs with that explicit override.
 
 ### LLM winner
 
@@ -622,7 +663,10 @@ Notes:
 ## Recommended defaults
 
 If you are starting from scratch:
-- start with `execution.strategy: "fixed_args"`
+- **do not pick a strategy until you inspect the arguments of the tool/lane implementations you want to compare**
+- use `execution.strategy: "fixed_args"` only when every lane truly supports the exact same argument shape
+- use `execution.strategy: "lane_single_call"` when you want to compare particular permutations of one tool call
+- use `execution.strategy: "lane_multi_call"` when you want to compare a more complex flow
 - start with `winner.mode: "formula"`
 - keep one clear baseline lane
 - use `sample_rate: 1` while developing
@@ -651,9 +695,10 @@ Lane records in `lanes/{id}.json` include additional fallback visibility fields:
 
 1. `run.json` - winner decision, fallback, and top-level path
 2. `lanes/{id}.json` - per-lane status, latency, protocol errors, patch info
-3. `artifacts/grading-output.json` - what the LLM judge returned
-4. `artifacts/grading-raw-output-*.md` - raw grader stdout/stderr when LLM judging failed
-5. `sessions/...` - lane transcripts for prompt-based strategies
+3. `~/.pi/agent/lab/runs/<project>/runs.jsonl` - append-only aggregate log across all runs in that project
+4. `artifacts/grading-output.json` - what the LLM judge returned
+5. `artifacts/grading-raw-output-*.md` - raw grader stdout/stderr when LLM judging failed
+6. `sessions/...` - lane transcripts for prompt-based strategies
 
 ## Validation
 
@@ -708,7 +753,6 @@ If you want to contribute ideas, open an issue/PR with:
 - `pi-extension/ab/selection.ts` - formula scoring/ranking
 - `pi-extension/ab/winner.ts` - winner logic
 - `pi-extension/ab/grading.ts` - LLM judge process orchestration
-- `pi-extension/ab/wizard.ts` - setup wizard
 - `pi-extension/ab/gc.ts` - retention and cleanup
 
 ## Local checks

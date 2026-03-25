@@ -108,7 +108,7 @@ export function runAbGcCommand(args: string, cwd: string): AbGcResult {
   }
 
   const options = parsed.options;
-  const runsRoot = join(homedir(), ".pi", "agent", "ab", "runs");
+  const runsRoot = join(homedir(), ".pi", "agent", "lab", "runs");
   const defaultProject = basename(cwd);
   const projectNames = options.allProjects
     ? (() => {

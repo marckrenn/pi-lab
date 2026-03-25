@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-AB_RUNS_ROOT="$HOME/.pi/agent/ab/runs"
+AB_RUNS_ROOT="$HOME/.pi/agent/lab/runs"
 SAMPLE_FILE="smoke-test.txt"
 OUTPUT_FILE="/tmp/packaged-edit-experiment-smoke.out"
 

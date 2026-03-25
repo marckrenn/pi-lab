@@ -20,6 +20,7 @@ export interface LaneConfig {
   id: string;
   label?: string;
   baseline?: boolean;
+  model?: string;
   extensions: string[];
 }
 
@@ -55,6 +56,8 @@ export interface WinnerConfig {
 
 export interface ToolConfig {
   name: string;
+  description?: string;
+  parameters_schema?: Record<string, unknown>;
 }
 
 export interface ExecutionConfig {
@@ -105,6 +108,7 @@ export interface LaneRunRecord {
   session_file?: string;
   worktree_path?: string;
   process_exit_code?: number;
+  lane_model?: string;
   lane_harness_used?: "direct" | "pi_prompt";
   lane_harness_requested?: "direct" | "pi_prompt";
   lane_harness_fallback_reason?: LaneHarnessFallbackReason;

@@ -59,6 +59,18 @@ async function getHeadSha(repoRoot: string, signal?: AbortSignal): Promise<strin
   return (await gitOutput(repoRoot, ["rev-parse", "HEAD"], signal)).trim();
 }
 
+export async function detectGitRepository(
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<{ ok: true; repoRoot: string } | { ok: false; error: string }> {
+  try {
+    const repoRoot = await getRepoRoot(cwd, signal);
+    return { ok: true, repoRoot };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? String(err) };
+  }
+}
+
 function inferLaneHarnessForStrategy(executionStrategy: unknown): "direct" | "pi_prompt" {
   return canonicalExecutionStrategy(executionStrategy) === "fixed_args" ? "direct" : "pi_prompt";
 }
@@ -449,6 +461,16 @@ function laneSingleCallPrompt(
     .join("\n");
 }
 
+export function resolveLaneModelOverride(lane: LaneConfig, inheritedModel?: string): string | undefined {
+  return lane.model?.trim() || inheritedModel?.trim() || undefined;
+}
+
+function appendLaneModelArg(piArgs: string[], lane: LaneConfig, inheritedModel?: string): void {
+  const model = resolveLaneModelOverride(lane, inheritedModel);
+  if (!model) return;
+  piArgs.push("--model", model);
+}
+
 function parseMultiCallLaneSession(sessionFile: string | undefined): {
   outputText?: string;
   isError?: boolean;
@@ -536,11 +558,10 @@ function parseMultiCallLaneSession(sessionFile: string | undefined): {
       strictJsonViolation ||
       missingFinalAnswer ||
       toolCallCount === 0 ||
-      customToolCallCount === 0 ||
-      sawToolError,
+      customToolCallCount === 0,
     totalTokens: lastAssistant?.usage?.totalTokens,
     statusHint,
-    errorHint: explicitErrorHint ?? toolErrorHints[0] ?? protocolErrorHint,
+    errorHint: explicitErrorHint ?? protocolErrorHint ?? (statusHint === "error" || sawToolError ? toolErrorHints[0] : undefined),
     toolCallCount,
     customToolCallCount,
   };
@@ -798,6 +819,33 @@ function normalizeNoIndexPatchPaths(patch: string, relPath: string): string {
   return normalized.join("\n");
 }
 
+async function createTargetFilePatch(
+  worktreePath: string,
+  laneDir: string,
+  relPath: string,
+  beforeContent: string,
+  afterContent: string,
+): Promise<{ patchPath: string; patchText: string; patchBytes: number }> {
+  const beforePath = join(laneDir, "target-before.md");
+  const afterPath = join(laneDir, "target-after.md");
+  writeFileSync(beforePath, beforeContent, "utf8");
+  writeFileSync(afterPath, afterContent, "utf8");
+
+  const noIndex = await runCommand("git", ["diff", "--no-index", "--binary", beforePath, afterPath], {
+    cwd: worktreePath,
+    timeoutMs: 10000,
+  });
+  const patchText = normalizeNoIndexPatchPaths(noIndex.stdout, relPath);
+  const patchPath = join(laneDir, "lane.patch");
+  writeFileSync(patchPath, patchText, "utf8");
+
+  return {
+    patchPath,
+    patchText,
+    patchBytes: Buffer.byteLength(patchText, "utf8"),
+  };
+}
+
 async function createWorktreePatch(worktreePath: string, laneDir: string): Promise<{ patchPath: string; patchText: string; patchBytes: number }> {
   await runCommand("git", ["add", "-N", "."], {
     cwd: worktreePath,
@@ -858,6 +906,53 @@ async function syncWorkspaceDeltaToWorktree(repoRoot: string, worktreePath: stri
     } else if (existsSync(dst)) {
       rmSync(dst, { force: true, recursive: true });
     }
+  }
+}
+
+async function worktreeHasDiff(worktreePath: string, signal?: AbortSignal): Promise<boolean> {
+  const status = await runCommand("git", ["status", "--porcelain"], {
+    cwd: worktreePath,
+    timeoutMs: 10000,
+    signal,
+  });
+  if (status.code !== 0) {
+    throw new Error(`Failed to inspect worktree status: ${status.stderr || status.stdout}`);
+  }
+  return status.stdout.trim().length > 0;
+}
+
+async function createWorktreePatchBaseline(worktreePath: string, signal?: AbortSignal): Promise<void> {
+  if (!(await worktreeHasDiff(worktreePath, signal))) return;
+
+  const add = await runCommand("git", ["add", "-A"], {
+    cwd: worktreePath,
+    timeoutMs: 15000,
+    signal,
+  });
+  if (add.code !== 0) {
+    throw new Error(`Failed to stage worktree baseline: ${add.stderr || add.stdout}`);
+  }
+
+  const commit = await runCommand(
+    "git",
+    [
+      "-c",
+      "user.name=pi-lab",
+      "-c",
+      "user.email=pi-lab@local",
+      "commit",
+      "-m",
+      "pi-lab baseline snapshot",
+      "--no-gpg-sign",
+    ],
+    {
+      cwd: worktreePath,
+      timeoutMs: 15000,
+      signal,
+    },
+  );
+  if (commit.code !== 0) {
+    throw new Error(`Failed to capture worktree baseline: ${commit.stderr || commit.stdout}`);
   }
 }
 
@@ -923,11 +1018,331 @@ export async function applyPatchToMain(
   };
 }
 
+export async function runBaselineEditFallbackNoGit(
+  loaded: LoadedExperiment,
+  run: RunContext,
+  cwd: string,
+  editArgs: { path: string; oldText: string; newText: string },
+  signal?: AbortSignal,
+): Promise<BaselineLaneFallbackResult> {
+  const lane = getBaselineLane(loaded.experiment);
+  const laneDir = join(run.dir, "lanes", lane.id);
+  const sessionDir = join(run.dir, "sessions", lane.id);
+  mkdirSync(laneDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const relPath = relativeTargetPath(cwd, resolve(cwd, editArgs.path));
+  const targetFilePath = resolve(cwd, editArgs.path);
+  const beforeContent = existsSync(targetFilePath) ? readFileSync(targetFilePath, "utf8") : "";
+  const promptPath = join(laneDir, "lane-prompt.md");
+  writeFileSync(promptPath, lanePrompt(lane, { path: relPath, oldText: editArgs.oldText, newText: editArgs.newText }), "utf8");
+
+  const laneHarnessRequested: "direct" | "pi_prompt" = resolveLaneHarness(executionStrategyOf(loaded.experiment)) === "pi_prompt" ? "pi_prompt" : "direct";
+  let laneHarnessUsed: "direct" | "pi_prompt" = laneHarnessRequested;
+  let laneHarnessFallbackReason: string | undefined;
+  let directLatencyMs: number | undefined;
+  let sessionPath: string | undefined;
+  let parsed: ReturnType<typeof parseLaneSession> = {
+    outputText: undefined,
+    isError: false,
+    totalTokens: undefined,
+    editCallCount: 1,
+    exactEditArgsMatch: true,
+    laneDone: true,
+  };
+  let piRes: { stdout: string; stderr: string; code: number; killed: boolean; timedOut: boolean } = {
+    stdout: "",
+    stderr: "",
+    code: 0,
+    killed: false,
+    timedOut: false,
+  };
+
+  const start = Date.now();
+  if (laneHarnessUsed === "direct") {
+    try {
+      const direct = await runLaneDirect(lane, {
+        cwd,
+        loadedPath: loaded.path,
+        worktreePath: cwd,
+        editArgs: { path: relPath, oldText: editArgs.oldText, newText: editArgs.newText },
+        signal,
+      });
+      directLatencyMs = direct.latencyMs;
+      piRes.code = direct.code;
+      piRes.timedOut = direct.timedOut;
+      parsed = { ...parsed, outputText: direct.outputText, isError: direct.isError };
+    } catch (err: any) {
+      laneHarnessUsed = "pi_prompt";
+      laneHarnessFallbackReason = directHarnessFallbackReasonForError(err);
+    }
+  }
+
+  if (laneHarnessUsed === "pi_prompt") {
+    const piArgs: string[] = ["-p", "--session-dir", sessionDir, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"];
+    for (const ext of lane.extensions) piArgs.push("-e", resolveConfiguredPath(ext, cwd, loaded.path));
+    piArgs.push(`@${promptPath}`);
+    piRes = await runLanePi(piArgs, { worktreePath: cwd, timeoutMs: timeoutMsOf(loaded.experiment), signal });
+    sessionPath = newestSessionFile(sessionDir);
+    parsed = parseLaneSession(sessionPath, { path: relPath, oldText: editArgs.oldText, newText: editArgs.newText });
+  }
+
+  const afterContent = existsSync(targetFilePath) ? readFileSync(targetFilePath, "utf8") : "";
+  const patch = await createTargetFilePatch(cwd, laneDir, relPath, beforeContent, afterContent);
+  const elapsed = laneHarnessUsed === "direct" ? (directLatencyMs ?? Date.now() - start) : Date.now() - start;
+  const protocolError = parsed.editCallCount !== 1 || !parsed.exactEditArgsMatch || !parsed.laneDone;
+  const patchBytes = patch.patchBytes;
+  const laneError = piRes.code !== 0 || parsed.isError === true || patchBytes === 0 || protocolError;
+  const protocolErrorText =
+    parsed.editCallCount !== 1
+      ? `Lane protocol violation: expected exactly 1 edit tool call, got ${parsed.editCallCount}`
+      : !parsed.exactEditArgsMatch
+        ? "Lane protocol violation: edit args differed from EXACT_EDIT_ARGS_JSON"
+        : !parsed.laneDone
+          ? "Lane protocol violation: final assistant response was not exactly LANE_DONE"
+          : undefined;
+
+  return {
+    lane: {
+      lane_id: lane.id,
+      status: laneError ? "error" : "success",
+      latency_ms: elapsed,
+      error:
+        laneError
+          ? protocolErrorText ?? (parsed.isError === true ? parsed.outputText ?? "Lane tool call returned error" : patchBytes === 0 ? "Lane produced no patch" : piRes.stderr || piRes.stdout || "Lane execution failed")
+          : undefined,
+      process_exit_code: piRes.code,
+      output_text: parsed.outputText,
+      total_tokens: parsed.totalTokens,
+      patch_path: patch.patchPath,
+      patch_bytes: patch.patchBytes,
+      session_file: sessionPath,
+      worktree_path: cwd,
+      lane_harness_requested: laneHarnessRequested,
+      lane_harness_used: laneHarnessUsed,
+      lane_harness_fallback_reason: laneHarnessFallbackReason,
+    },
+    patchText: patch.patchText,
+  };
+}
+
+export async function runBaselineFixedArgsFallbackNoGit(
+  loaded: LoadedExperiment,
+  run: RunContext,
+  cwd: string,
+  targetTool: string,
+  toolArgs: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<BaselineLaneFallbackResult> {
+  const lane = getBaselineLane(loaded.experiment);
+  const laneDir = join(run.dir, "lanes", lane.id);
+  const sessionDir = join(run.dir, "sessions", lane.id);
+  mkdirSync(laneDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const targetRelPath = typeof toolArgs.path === "string" ? relativeTargetPath(cwd, resolve(cwd, toolArgs.path)) : undefined;
+  const targetFilePath = targetRelPath ? join(cwd, targetRelPath) : undefined;
+  const beforeContent = targetFilePath && existsSync(targetFilePath) ? readFileSync(targetFilePath, "utf8") : undefined;
+  const promptPath = join(laneDir, "lane-prompt.md");
+  writeFileSync(promptPath, laneFixedArgsPrompt(lane, targetTool, toolArgs), "utf8");
+
+  const laneHarnessRequested: "direct" | "pi_prompt" = resolveLaneHarness(executionStrategyOf(loaded.experiment)) === "pi_prompt" ? "pi_prompt" : "direct";
+  let laneHarnessUsed: "direct" | "pi_prompt" = laneHarnessRequested;
+  let laneHarnessFallbackReason: string | undefined;
+  let directLatencyMs: number | undefined;
+  let sessionPath: string | undefined;
+  let parsed: ReturnType<typeof parseFixedArgsLaneSession> = {
+    outputText: undefined,
+    isError: false,
+    totalTokens: undefined,
+    toolCallCount: 1,
+    exactArgsMatch: true,
+    laneDone: true,
+  };
+  let piRes: { stdout: string; stderr: string; code: number; killed: boolean; timedOut: boolean } = {
+    stdout: "",
+    stderr: "",
+    code: 0,
+    killed: false,
+    timedOut: false,
+  };
+
+  const start = Date.now();
+  if (laneHarnessUsed === "direct") {
+    try {
+      const direct = await runLaneDirectFixedArgs(lane, {
+        cwd,
+        loadedPath: loaded.path,
+        worktreePath: cwd,
+        targetTool,
+        args: toolArgs,
+        signal,
+      });
+      directLatencyMs = direct.latencyMs;
+      piRes.code = direct.code;
+      piRes.timedOut = direct.timedOut;
+      parsed = { ...parsed, outputText: direct.outputText, isError: direct.isError };
+    } catch (err: any) {
+      laneHarnessUsed = "pi_prompt";
+      laneHarnessFallbackReason = directHarnessFallbackReasonForError(err);
+    }
+  }
+
+  if (laneHarnessUsed === "pi_prompt") {
+    const piArgs: string[] = ["-p", "--session-dir", sessionDir, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"];
+    for (const ext of lane.extensions) piArgs.push("-e", resolveConfiguredPath(ext, cwd, loaded.path));
+    piArgs.push(`@${promptPath}`);
+    piRes = await runLanePi(piArgs, { worktreePath: cwd, timeoutMs: timeoutMsOf(loaded.experiment), signal });
+    sessionPath = newestSessionFile(sessionDir);
+    parsed = parseFixedArgsLaneSession(sessionPath, targetTool, toolArgs);
+  }
+
+  const afterContent = targetFilePath && existsSync(targetFilePath) ? readFileSync(targetFilePath, "utf8") : undefined;
+  const patch =
+    targetRelPath && beforeContent !== undefined && afterContent !== undefined
+      ? await createTargetFilePatch(cwd, laneDir, targetRelPath, beforeContent, afterContent)
+      : undefined;
+  const elapsed = laneHarnessUsed === "direct" ? (directLatencyMs ?? Date.now() - start) : Date.now() - start;
+  const protocolError = laneHarnessUsed === "pi_prompt" && (parsed.toolCallCount !== 1 || !parsed.exactArgsMatch || !parsed.laneDone);
+  const protocolErrorText =
+    parsed.toolCallCount !== 1
+      ? `Lane protocol violation: expected exactly 1 ${targetTool} tool call, got ${parsed.toolCallCount}`
+      : !parsed.exactArgsMatch
+        ? "Lane protocol violation: tool args differed from EXACT_TOOL_ARGS_JSON"
+        : !parsed.laneDone
+          ? "Lane protocol violation: final assistant response was not exactly LANE_DONE"
+          : undefined;
+  const laneError = piRes.code !== 0 || parsed.isError === true || protocolError;
+
+  return {
+    lane: {
+      lane_id: lane.id,
+      status: laneError ? "error" : "success",
+      latency_ms: elapsed,
+      error: laneError ? protocolErrorText ?? (parsed.isError === true ? parsed.outputText ?? `Lane ${lane.id} tool call returned error` : piRes.stderr || piRes.stdout || `Lane ${lane.id} execution failed`) : undefined,
+      process_exit_code: piRes.code,
+      output_text: parsed.outputText,
+      total_tokens: parsed.totalTokens,
+      patch_path: patch?.patchPath,
+      patch_bytes: patch?.patchBytes,
+      session_file: sessionPath,
+      worktree_path: cwd,
+      lane_harness_requested: laneHarnessRequested,
+      lane_harness_used: laneHarnessUsed,
+      lane_harness_fallback_reason: laneHarnessFallbackReason,
+    },
+    patchText: patch?.patchText,
+  };
+}
+
+export async function runBaselineSingleCallFallbackNoGit(
+  loaded: LoadedExperiment,
+  run: RunContext,
+  cwd: string,
+  targetTool: string,
+  flowArgs: { task: string; context?: string; constraints?: string },
+  signal?: AbortSignal,
+  inheritedModel?: string,
+): Promise<BaselineLaneFallbackResult> {
+  const lane = getBaselineLane(loaded.experiment);
+  const effectiveLaneModel = resolveLaneModelOverride(lane, inheritedModel);
+  const laneDir = join(run.dir, "lanes", lane.id);
+  const sessionDir = join(run.dir, "sessions", lane.id);
+  mkdirSync(laneDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const promptPath = join(laneDir, "lane-prompt.md");
+  writeFileSync(promptPath, laneSingleCallPrompt(lane, targetTool, flowArgs), "utf8");
+
+  const piArgs: string[] = ["-p", "--session-dir", sessionDir, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"];
+  appendLaneModelArg(piArgs, lane, inheritedModel);
+  for (const ext of lane.extensions) piArgs.push("-e", resolveConfiguredPath(ext, cwd, loaded.path));
+  piArgs.push(`@${promptPath}`);
+
+  const start = Date.now();
+  const piRes = await runLanePi(piArgs, { worktreePath: cwd, timeoutMs: timeoutMsOf(loaded.experiment), signal });
+  const sessionPath = newestSessionFile(sessionDir);
+  const parsed = parseSingleCallLaneSession(sessionPath, targetTool);
+  const elapsed = Date.now() - start;
+  const laneError = piRes.code !== 0 || parsed.isError === true;
+
+  return {
+    lane: {
+      lane_id: lane.id,
+      status: laneError ? "error" : "success",
+      latency_ms: elapsed,
+      error: laneError ? parsed.errorHint ?? (parsed.isError === true ? parsed.outputText ?? "Lane tool call returned error" : piRes.stderr || piRes.stdout || "Lane execution failed") : undefined,
+      process_exit_code: piRes.code,
+      output_text: parsed.outputText,
+      total_tokens: parsed.totalTokens,
+      session_file: sessionPath,
+      worktree_path: cwd,
+      lane_model: effectiveLaneModel,
+      lane_harness_requested: "pi_prompt",
+      lane_harness_used: "pi_prompt",
+    },
+  };
+}
+
+export async function runBaselineMultiCallFallbackNoGit(
+  loaded: LoadedExperiment,
+  run: RunContext,
+  cwd: string,
+  targetTool: string,
+  flowArgs: { task: string; context?: string; constraints?: string },
+  signal?: AbortSignal,
+  inheritedModel?: string,
+): Promise<BaselineLaneFallbackResult> {
+  const lane = getBaselineLane(loaded.experiment);
+  const effectiveLaneModel = resolveLaneModelOverride(lane, inheritedModel);
+  const laneDir = join(run.dir, "lanes", lane.id);
+  const sessionDir = join(run.dir, "sessions", lane.id);
+  mkdirSync(laneDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const promptPath = join(laneDir, "lane-prompt.md");
+  writeFileSync(promptPath, laneMultiCallPrompt(lane, targetTool, flowArgs), "utf8");
+
+  const piArgs: string[] = ["-p", "--session-dir", sessionDir, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"];
+  appendLaneModelArg(piArgs, lane, inheritedModel);
+  for (const ext of lane.extensions) piArgs.push("-e", resolveConfiguredPath(ext, cwd, loaded.path));
+  piArgs.push(`@${promptPath}`);
+
+  const start = Date.now();
+  const piRes = await runLanePi(piArgs, { worktreePath: cwd, timeoutMs: timeoutMsOf(loaded.experiment), signal });
+  const sessionPath = newestSessionFile(sessionDir);
+  const parsed = parseMultiCallLaneSession(sessionPath);
+  const elapsed = Date.now() - start;
+  const laneError = piRes.code !== 0 || parsed.isError === true;
+
+  return {
+    lane: {
+      lane_id: lane.id,
+      status: laneError ? "error" : "success",
+      latency_ms: elapsed,
+      error: laneError ? parsed.errorHint ?? (parsed.isError === true ? parsed.outputText ?? "Lane tool call returned error" : piRes.stderr || piRes.stdout || "Lane execution failed") : undefined,
+      process_exit_code: piRes.code,
+      output_text: parsed.outputText,
+      total_tokens: parsed.totalTokens,
+      session_file: sessionPath,
+      worktree_path: cwd,
+      lane_model: effectiveLaneModel,
+      lane_harness_requested: "pi_prompt",
+      lane_harness_used: "pi_prompt",
+    },
+  };
+}
+
 export interface LaneProgressItem {
   lane_id: string;
   status: "pending" | "running" | "success" | "error" | "timeout";
   elapsed_ms?: number;
   error?: string;
+  total_tokens?: number;
+  patch_bytes?: number;
+  process_exit_code?: number;
+  lane_model?: string;
+  lane_harness?: "direct" | "pi_prompt";
 }
 
 export interface LaneProgressSnapshot {
@@ -947,6 +1362,15 @@ export interface CapabilityFairnessTelemetry {
   capability_intersection_keys: string[];
   capability_union_keys: string[];
   lane_capabilities: LaneCapabilityInfo[];
+}
+
+export interface BaselineLaneFallbackResult {
+  lane: LaneRunRecord;
+  patchText?: string;
+}
+
+function getBaselineLane(experiment: LoadedExperiment["experiment"]): LaneConfig {
+  return experiment.lanes.find((lane) => lane.baseline) ?? experiment.lanes[0]!;
 }
 
 export async function runExperimentLanes(
@@ -999,7 +1423,7 @@ export async function runExperimentLanes(
     }
   }
 
-  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string }>();
+  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }>();
   for (const lane of experiment.lanes) {
     laneProgress.set(lane.id, { status: "pending" });
   }
@@ -1020,6 +1444,11 @@ export async function runExperimentLanes(
           status: entry.status,
           elapsed_ms,
           error: entry.error,
+          total_tokens: entry.totalTokens,
+          patch_bytes: entry.patchBytes,
+          process_exit_code: entry.processExitCode,
+          lane_model: entry.laneModel,
+          lane_harness: entry.laneHarness,
         };
       }),
     });
@@ -1028,7 +1457,7 @@ export async function runExperimentLanes(
   const setLaneProgress = (
     laneId: string,
     status: LaneProgressItem["status"],
-    opts?: { elapsedMs?: number; error?: string },
+    opts?: { elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" },
   ) => {
     const current = laneProgress.get(laneId) ?? { status: "pending" as const };
     laneProgress.set(laneId, {
@@ -1036,6 +1465,11 @@ export async function runExperimentLanes(
       startedAt: status === "running" ? Date.now() : current.startedAt,
       elapsedMs: opts?.elapsedMs ?? (status === "running" ? current.elapsedMs : current.elapsedMs),
       error: opts?.error,
+      totalTokens: opts?.totalTokens ?? current.totalTokens,
+      patchBytes: opts?.patchBytes ?? current.patchBytes,
+      processExitCode: opts?.processExitCode ?? current.processExitCode,
+      laneModel: opts?.laneModel ?? current.laneModel,
+      laneHarness: opts?.laneHarness ?? current.laneHarness,
     });
     emitProgress();
   };
@@ -1178,18 +1612,7 @@ export async function runExperimentLanes(
       const afterContent = existsSync(targetFilePath) ? readFileSync(targetFilePath, "utf8") : "";
       // Always generate the lane patch from runtime before/after file snapshots.
       // This avoids HEAD/index drift producing patches that don't apply to the live workspace.
-      const beforePath = join(laneDir, "target-before.md");
-      const afterPath = join(laneDir, "target-after.md");
-      writeFileSync(beforePath, beforeContent, "utf8");
-      writeFileSync(afterPath, afterContent, "utf8");
-
-      const noIndex = await runCommand("git", ["diff", "--no-index", "--binary", beforePath, afterPath], {
-        cwd: worktreePath,
-        timeoutMs: 10000,
-      });
-      const patchText = normalizeNoIndexPatchPaths(noIndex.stdout, relPath);
-
-      writeFileSync(patchPath, patchText, "utf8");
+      const patch = await createTargetFilePatch(worktreePath, laneDir, relPath, beforeContent, afterContent);
 
       if (!debugEnabledOf(experiment)) {
         await removeWorktree(repoRoot, worktreePath);
@@ -1205,8 +1628,8 @@ export async function runExperimentLanes(
           process_exit_code: piRes.code,
           output_text: parsed.outputText,
           total_tokens: parsed.totalTokens,
-          patch_path: patchPath,
-          patch_bytes: Buffer.byteLength(patchText, "utf8"),
+          patch_path: patch.patchPath,
+          patch_bytes: patch.patchBytes,
           session_file: sessionPath,
           worktree_path: worktreePath,
           lane_harness_requested: laneHarnessRequested,
@@ -1215,7 +1638,7 @@ export async function runExperimentLanes(
         };
       }
 
-      const patchBytes = Buffer.byteLength(patchText, "utf8");
+      const patchBytes = patch.patchBytes;
       const protocolError =
         parsed.editCallCount !== 1 ||
         !parsed.exactEditArgsMatch ||
@@ -1251,7 +1674,7 @@ export async function runExperimentLanes(
         process_exit_code: piRes.code,
         output_text: parsed.outputText,
         total_tokens: parsed.totalTokens,
-        patch_path: patchPath,
+        patch_path: patch.patchPath,
         patch_bytes: patchBytes,
         session_file: sessionPath,
         worktree_path: worktreePath,
@@ -1293,7 +1716,7 @@ export async function runExperimentLanes(
     const record = await promise;
     const status: LaneProgressItem["status"] =
       record.status === "success" ? "success" : record.status === "timeout" ? "timeout" : "error";
-    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error });
+    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error, totalTokens: record.total_tokens, patchBytes: record.patch_bytes, processExitCode: record.process_exit_code, laneModel: record.lane_model, laneHarness: record.lane_harness_used ?? record.lane_harness_requested });
     return record;
   });
 
@@ -1329,6 +1752,7 @@ export async function runExperimentLanesFixedArgsTool(
   const timeoutMs = timeoutMsOf(experiment);
   const repoRoot = await getRepoRoot(cwd, signal);
   const headSha = await getHeadSha(repoRoot, signal);
+  const targetRelPath = typeof toolArgs.path === "string" ? relativeTargetPath(cwd, resolve(cwd, toolArgs.path)) : undefined;
 
   const policy = experiment.failure_policy ?? {};
   const abortController = new AbortController();
@@ -1364,7 +1788,7 @@ export async function runExperimentLanesFixedArgsTool(
     }
   }
 
-  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string }>();
+  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }>();
   for (const lane of experiment.lanes) laneProgress.set(lane.id, { status: "pending" });
 
   const emitProgress = () => {
@@ -1383,6 +1807,11 @@ export async function runExperimentLanesFixedArgsTool(
           status: entry.status,
           elapsed_ms,
           error: entry.error,
+          total_tokens: entry.totalTokens,
+          patch_bytes: entry.patchBytes,
+          process_exit_code: entry.processExitCode,
+          lane_model: entry.laneModel,
+          lane_harness: entry.laneHarness,
         };
       }),
     });
@@ -1391,7 +1820,7 @@ export async function runExperimentLanesFixedArgsTool(
   const setLaneProgress = (
     laneId: string,
     status: LaneProgressItem["status"],
-    opts?: { elapsedMs?: number; error?: string },
+    opts?: { elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" },
   ) => {
     const current = laneProgress.get(laneId) ?? { status: "pending" as const };
     laneProgress.set(laneId, {
@@ -1399,6 +1828,11 @@ export async function runExperimentLanesFixedArgsTool(
       startedAt: status === "running" ? Date.now() : current.startedAt,
       elapsedMs: opts?.elapsedMs ?? current.elapsedMs,
       error: opts?.error,
+      totalTokens: opts?.totalTokens ?? current.totalTokens,
+      patchBytes: opts?.patchBytes ?? current.patchBytes,
+      processExitCode: opts?.processExitCode ?? current.processExitCode,
+      laneModel: opts?.laneModel ?? current.laneModel,
+      laneHarness: opts?.laneHarness ?? current.laneHarness,
     });
     emitProgress();
   };
@@ -1423,6 +1857,10 @@ export async function runExperimentLanesFixedArgsTool(
     const promptPath = join(laneDir, "lane-prompt.md");
     writeFileSync(promptPath, laneFixedArgsPrompt(lane, targetTool, toolArgs), "utf8");
 
+    const laneHarnessRequested: "direct" | "pi_prompt" = requestedLaneHarness === "pi_prompt" ? "pi_prompt" : "direct";
+    let laneHarnessUsed: "direct" | "pi_prompt" = laneHarnessRequested;
+    let laneHarnessFallbackReason: string | undefined;
+
     try {
       const wtAdd = await runCommand("git", ["worktree", "add", "--detach", worktreePath, headSha], {
         cwd: repoRoot,
@@ -1445,9 +1883,8 @@ export async function runExperimentLanesFixedArgsTool(
 
       await syncWorkspaceDeltaToWorktree(repoRoot, worktreePath, abortController.signal);
 
-      const laneHarnessRequested: "direct" | "pi_prompt" = requestedLaneHarness === "pi_prompt" ? "pi_prompt" : "direct";
-      let laneHarnessUsed: "direct" | "pi_prompt" = laneHarnessRequested;
-      let laneHarnessFallbackReason: string | undefined;
+      const targetFilePath = targetRelPath ? join(worktreePath, targetRelPath) : undefined;
+      const beforeContent = targetFilePath && existsSync(targetFilePath) ? readFileSync(targetFilePath, "utf8") : undefined;
 
       try {
         const loadedTools = await loadLaneToolsDirect(lane, cwd, loaded.path, worktreePath, {
@@ -1552,6 +1989,12 @@ export async function runExperimentLanesFixedArgsTool(
         piRes.timedOut = true;
       }
 
+      const afterContent = targetFilePath && existsSync(targetFilePath) ? readFileSync(targetFilePath, "utf8") : undefined;
+      const patch =
+        targetRelPath && beforeContent !== undefined && afterContent !== undefined
+          ? await createTargetFilePatch(worktreePath, laneDir, targetRelPath, beforeContent, afterContent)
+          : await createWorktreePatch(worktreePath, laneDir);
+
       if (!debugEnabledOf(experiment)) {
         await removeWorktree(repoRoot, worktreePath);
       }
@@ -1566,6 +2009,8 @@ export async function runExperimentLanesFixedArgsTool(
           process_exit_code: piRes.code,
           output_text: parsed.outputText,
           total_tokens: parsed.totalTokens,
+          patch_path: patch.patchPath,
+          patch_bytes: patch.patchBytes,
           session_file: sessionPath,
           worktree_path: worktreePath,
           lane_harness_requested: laneHarnessRequested,
@@ -1604,6 +2049,8 @@ export async function runExperimentLanesFixedArgsTool(
         process_exit_code: piRes.code,
         output_text: parsed.outputText,
         total_tokens: parsed.totalTokens,
+        patch_path: patch.patchPath,
+        patch_bytes: patch.patchBytes,
         session_file: sessionPath,
         worktree_path: worktreePath,
         lane_harness_requested: laneHarnessRequested,
@@ -1651,7 +2098,7 @@ export async function runExperimentLanesFixedArgsTool(
     const record = await promise;
     const status: LaneProgressItem["status"] =
       record.status === "success" ? "success" : record.status === "timeout" ? "timeout" : "error";
-    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error });
+    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error, totalTokens: record.total_tokens, patchBytes: record.patch_bytes, processExitCode: record.process_exit_code, laneModel: record.lane_model, laneHarness: record.lane_harness_used ?? record.lane_harness_requested });
     return record;
   });
 
@@ -1691,6 +2138,7 @@ export async function runExperimentLanesSingleCall(
   flowArgs: { task: string; context?: string; constraints?: string },
   signal?: AbortSignal,
   onProgress?: (snapshot: LaneProgressSnapshot) => void,
+  inheritedModel?: string,
 ): Promise<{ records: LaneRunRecord[]; fairness: CapabilityFairnessTelemetry }> {
   const experiment = loaded.experiment;
   const timeoutMs = timeoutMsOf(experiment);
@@ -1724,8 +2172,8 @@ export async function runExperimentLanesSingleCall(
     }
   }
 
-  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string }>();
-  for (const lane of experiment.lanes) laneProgress.set(lane.id, { status: "pending" });
+  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }>();
+  for (const lane of experiment.lanes) laneProgress.set(lane.id, { status: "pending", laneModel: resolveLaneModelOverride(lane, inheritedModel) });
 
   const emitProgress = () => {
     if (!onProgress) return;
@@ -1739,18 +2187,28 @@ export async function runExperimentLanesSingleCall(
           status: entry.status,
           elapsed_ms: entry.status === "running" ? (entry.startedAt ? now - entry.startedAt : entry.elapsedMs) : entry.elapsedMs,
           error: entry.error,
+          total_tokens: entry.totalTokens,
+          patch_bytes: entry.patchBytes,
+          process_exit_code: entry.processExitCode,
+          lane_model: entry.laneModel,
+          lane_harness: entry.laneHarness,
         };
       }),
     });
   };
 
-  const setLaneProgress = (laneId: string, status: LaneProgressItem["status"], opts?: { elapsedMs?: number; error?: string }) => {
+  const setLaneProgress = (laneId: string, status: LaneProgressItem["status"], opts?: { elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }) => {
     const current = laneProgress.get(laneId) ?? { status: "pending" as const };
     laneProgress.set(laneId, {
       status,
       startedAt: status === "running" ? Date.now() : current.startedAt,
       elapsedMs: opts?.elapsedMs ?? current.elapsedMs,
       error: opts?.error,
+      totalTokens: opts?.totalTokens ?? current.totalTokens,
+      patchBytes: opts?.patchBytes ?? current.patchBytes,
+      processExitCode: opts?.processExitCode ?? current.processExitCode,
+      laneModel: opts?.laneModel ?? current.laneModel,
+      laneHarness: opts?.laneHarness ?? current.laneHarness,
     });
     emitProgress();
   };
@@ -1761,7 +2219,8 @@ export async function runExperimentLanesSingleCall(
   const laneCapabilities = new Map<string, LaneCapabilityInfo>();
 
   const lanePromises = experiment.lanes.map(async (lane, laneIndex): Promise<LaneRunRecord> => {
-    setLaneProgress(lane.id, "running");
+    const effectiveLaneModel = resolveLaneModelOverride(lane, inheritedModel);
+    setLaneProgress(lane.id, "running", { laneModel: effectiveLaneModel });
 
     const laneDir = join(run.dir, "lanes", lane.id);
     mkdirSync(laneDir, { recursive: true });
@@ -1792,11 +2251,13 @@ export async function runExperimentLanesSingleCall(
           lane_id: lane.id,
           status: "error",
           error: `Failed to create worktree: ${wtAdd.stderr || wtAdd.stdout}`,
+          lane_model: effectiveLaneModel,
           lane_harness_used: "pi_prompt",
         };
       }
 
       await syncWorkspaceDeltaToWorktree(repoRoot, worktreePath, abortController.signal);
+      await createWorktreePatchBaseline(worktreePath, abortController.signal);
 
       try {
         const loadedTools = await loadLaneToolsDirect(lane, cwd, loaded.path, worktreePath, { includeDefaultEdit: false });
@@ -1825,6 +2286,7 @@ export async function runExperimentLanesSingleCall(
         "--no-prompt-templates",
         "--no-themes",
       ];
+      appendLaneModelArg(piArgs, lane, inheritedModel);
 
       if (process.env.PI_AB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
         piArgs.push("--mode", "json");
@@ -1867,6 +2329,7 @@ export async function runExperimentLanesSingleCall(
           patch_bytes: patch.patchBytes,
           session_file: sessionPath,
           worktree_path: worktreePath,
+          lane_model: effectiveLaneModel,
           lane_harness_used: "pi_prompt",
         };
       }
@@ -1892,6 +2355,7 @@ export async function runExperimentLanesSingleCall(
         patch_bytes: patch.patchBytes,
         session_file: sessionPath,
         worktree_path: worktreePath,
+        lane_model: effectiveLaneModel,
         lane_harness_used: "pi_prompt",
       };
     } catch (err: any) {
@@ -1912,6 +2376,7 @@ export async function runExperimentLanesSingleCall(
         lane_id: lane.id,
         status: "error",
         error: err?.message ?? String(err),
+        lane_model: effectiveLaneModel,
         lane_harness_used: "pi_prompt",
       };
     } finally {
@@ -1933,7 +2398,7 @@ export async function runExperimentLanesSingleCall(
     const record = await promise;
     const status: LaneProgressItem["status"] =
       record.status === "success" ? "success" : record.status === "timeout" ? "timeout" : "error";
-    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error });
+    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error, totalTokens: record.total_tokens, patchBytes: record.patch_bytes, processExitCode: record.process_exit_code, laneModel: record.lane_model, laneHarness: record.lane_harness_used ?? record.lane_harness_requested });
     return record;
   });
 
@@ -1973,6 +2438,7 @@ export async function runExperimentLanesMultiCall(
   flowArgs: { task: string; context?: string; constraints?: string },
   signal?: AbortSignal,
   onProgress?: (snapshot: LaneProgressSnapshot) => void,
+  inheritedModel?: string,
 ): Promise<LaneRunRecord[]> {
   const experiment = loaded.experiment;
   const timeoutMs = timeoutMsOf(experiment);
@@ -2006,8 +2472,8 @@ export async function runExperimentLanesMultiCall(
     }
   }
 
-  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string }>();
-  for (const lane of experiment.lanes) laneProgress.set(lane.id, { status: "pending" });
+  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }>();
+  for (const lane of experiment.lanes) laneProgress.set(lane.id, { status: "pending", laneModel: resolveLaneModelOverride(lane, inheritedModel) });
 
   const emitProgress = () => {
     if (!onProgress) return;
@@ -2021,18 +2487,28 @@ export async function runExperimentLanesMultiCall(
           status: entry.status,
           elapsed_ms: entry.status === "running" ? (entry.startedAt ? now - entry.startedAt : entry.elapsedMs) : entry.elapsedMs,
           error: entry.error,
+          total_tokens: entry.totalTokens,
+          patch_bytes: entry.patchBytes,
+          process_exit_code: entry.processExitCode,
+          lane_model: entry.laneModel,
+          lane_harness: entry.laneHarness,
         };
       }),
     });
   };
 
-  const setLaneProgress = (laneId: string, status: LaneProgressItem["status"], opts?: { elapsedMs?: number; error?: string }) => {
+  const setLaneProgress = (laneId: string, status: LaneProgressItem["status"], opts?: { elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }) => {
     const current = laneProgress.get(laneId) ?? { status: "pending" as const };
     laneProgress.set(laneId, {
       status,
       startedAt: status === "running" ? Date.now() : current.startedAt,
       elapsedMs: opts?.elapsedMs ?? current.elapsedMs,
       error: opts?.error,
+      totalTokens: opts?.totalTokens ?? current.totalTokens,
+      patchBytes: opts?.patchBytes ?? current.patchBytes,
+      processExitCode: opts?.processExitCode ?? current.processExitCode,
+      laneModel: opts?.laneModel ?? current.laneModel,
+      laneHarness: opts?.laneHarness ?? current.laneHarness,
     });
     emitProgress();
   };
@@ -2041,7 +2517,8 @@ export async function runExperimentLanesMultiCall(
   const progressTimer = onProgress ? setInterval(emitProgress, 500) : undefined;
 
   const lanePromises = experiment.lanes.map(async (lane, laneIndex): Promise<LaneRunRecord> => {
-    setLaneProgress(lane.id, "running");
+    const effectiveLaneModel = resolveLaneModelOverride(lane, inheritedModel);
+    setLaneProgress(lane.id, "running", { laneModel: effectiveLaneModel });
 
     const laneDir = join(run.dir, "lanes", lane.id);
     mkdirSync(laneDir, { recursive: true });
@@ -2066,11 +2543,13 @@ export async function runExperimentLanesMultiCall(
           lane_id: lane.id,
           status: "error",
           error: `Failed to create worktree: ${wtAdd.stderr || wtAdd.stdout}`,
+          lane_model: effectiveLaneModel,
           lane_harness_used: "pi_prompt",
         };
       }
 
       await syncWorkspaceDeltaToWorktree(repoRoot, worktreePath, abortController.signal);
+      await createWorktreePatchBaseline(worktreePath, abortController.signal);
 
       const piArgs: string[] = [
         "-p",
@@ -2081,6 +2560,7 @@ export async function runExperimentLanesMultiCall(
         "--no-prompt-templates",
         "--no-themes",
       ];
+      appendLaneModelArg(piArgs, lane, inheritedModel);
 
       if (process.env.PI_AB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
         piArgs.push("--mode", "json");
@@ -2103,6 +2583,7 @@ export async function runExperimentLanesMultiCall(
 
       const sessionPath = newestSessionFile(sessionDir);
       const parsed = parseMultiCallLaneSession(sessionPath);
+      const patch = await createWorktreePatch(worktreePath, laneDir);
 
       if (!debugEnabledOf(experiment)) {
         await removeWorktree(repoRoot, worktreePath);
@@ -2118,8 +2599,11 @@ export async function runExperimentLanesMultiCall(
           process_exit_code: piRes.code,
           output_text: parsed.outputText,
           total_tokens: parsed.totalTokens,
+          patch_path: patch.patchPath,
+          patch_bytes: patch.patchBytes,
           session_file: sessionPath,
           worktree_path: worktreePath,
+          lane_model: effectiveLaneModel,
           lane_harness_used: "pi_prompt",
         };
       }
@@ -2141,8 +2625,11 @@ export async function runExperimentLanesMultiCall(
         process_exit_code: piRes.code,
         output_text: parsed.outputText,
         total_tokens: parsed.totalTokens,
+        patch_path: patch.patchPath,
+        patch_bytes: patch.patchBytes,
         session_file: sessionPath,
         worktree_path: worktreePath,
+        lane_model: effectiveLaneModel,
         lane_harness_used: "pi_prompt",
       };
     } catch (err: any) {
@@ -2155,6 +2642,7 @@ export async function runExperimentLanesMultiCall(
         lane_id: lane.id,
         status: "error",
         error: err?.message ?? String(err),
+        lane_model: effectiveLaneModel,
         lane_harness_used: "pi_prompt",
       };
     } finally {
@@ -2176,7 +2664,7 @@ export async function runExperimentLanesMultiCall(
     const record = await promise;
     const status: LaneProgressItem["status"] =
       record.status === "success" ? "success" : record.status === "timeout" ? "timeout" : "error";
-    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error });
+    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error, totalTokens: record.total_tokens, patchBytes: record.patch_bytes, processExitCode: record.process_exit_code, laneModel: record.lane_model, laneHarness: record.lane_harness_used ?? record.lane_harness_requested });
     return record;
   });
 
