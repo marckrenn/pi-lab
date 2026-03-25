@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -29,6 +29,8 @@ import {
   canonicalExecutionStrategy,
   executionStrategyOf,
   formatExperimentSummary,
+  getGlobalLabDir,
+  getProjectLabDir,
   loadExperiments,
   selectExperimentForEdit,
   selectExperimentForTool,
@@ -1311,12 +1313,147 @@ async function showExperimentsManager(ctx: any, experimentDirs?: string[]) {
   });
 }
 
+type LabRunSummary = {
+  scope: "local" | "global";
+  runId: string;
+  dir: string;
+  experimentId?: string;
+  timestamp?: string;
+  stage?: string;
+  winnerLaneId?: string;
+  winnerMode?: string;
+  selectionSource?: string;
+  reason?: string;
+  error?: string;
+};
+
+function readRunSummary(scope: "local" | "global", dir: string, runId: string): LabRunSummary | null {
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, "run.json"), "utf8"));
+    return {
+      scope,
+      runId,
+      dir,
+      experimentId: manifest?.experiment_id,
+      timestamp: manifest?.timestamp,
+      stage: manifest?.stage,
+      winnerLaneId: manifest?.winner_lane_id,
+      winnerMode: manifest?.winner_mode,
+      selectionSource: manifest?.selection_source,
+      reason: manifest?.reason,
+      error: manifest?.error,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function loadRunSummaries(cwd: string): LabRunSummary[] {
+  const projectName = basename(cwd);
+  const scopedDirs: Array<{ scope: "local" | "global"; dir: string }> = [
+    { scope: "local", dir: getProjectLabDir(cwd) },
+    { scope: "global", dir: join(getGlobalLabDir(), projectName) },
+  ];
+
+  const runs: LabRunSummary[] = [];
+  for (const scoped of scopedDirs) {
+    if (!existsSync(scoped.dir)) continue;
+    for (const entry of readdirSync(scoped.dir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name === "experiments") continue;
+      const summary = readRunSummary(scoped.scope, join(scoped.dir, entry.name), entry.name);
+      if (summary) runs.push(summary);
+    }
+  }
+
+  runs.sort((a, b) => (b.timestamp ?? b.runId).localeCompare(a.timestamp ?? a.runId));
+  return runs;
+}
+
+function formatRunChoiceLabel(run: LabRunSummary): string {
+  const status = run.winnerLaneId ? `${run.winnerLaneId}` : run.stage ?? "unknown";
+  const experiment = run.experimentId ?? "unknown-exp";
+  return `[${run.scope}] ${run.runId} · ${experiment} · ${status}`;
+}
+
+function formatRunDetails(run: LabRunSummary): string {
+  return [
+    `Run: ${run.runId}`,
+    `Scope: ${run.scope}`,
+    `Path: ${run.dir}`,
+    `Experiment: ${run.experimentId ?? "—"}`,
+    `Timestamp: ${run.timestamp ?? "—"}`,
+    `Stage: ${run.stage ?? "—"}`,
+    `Winner: ${run.winnerLaneId ?? "—"}`,
+    `Winner mode: ${run.winnerMode ?? "—"}`,
+    `Selection source: ${run.selectionSource ?? "—"}`,
+    run.reason ? `Reason: ${run.reason}` : undefined,
+    run.error ? `Error: ${run.error}` : undefined,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function showRunsMenu(ctx: any) {
+  const runs = loadRunSummaries(ctx.cwd);
+  if (runs.length === 0) {
+    ctx.ui.notify("No lab runs found for this project (local or global).", "warning");
+    return;
+  }
+
+  const scopeChoice = await ctx.ui.select("pi-lab runs", [
+    `Recent local runs (${runs.filter((r) => r.scope === "local").length})`,
+    `Recent global runs (${runs.filter((r) => r.scope === "global").length})`,
+    `All recent runs (${runs.length})`,
+  ]);
+  if (!scopeChoice) return;
+
+  const visibleRuns = scopeChoice.startsWith("Recent local")
+    ? runs.filter((r) => r.scope === "local")
+    : scopeChoice.startsWith("Recent global")
+      ? runs.filter((r) => r.scope === "global")
+      : runs;
+
+  if (visibleRuns.length === 0) {
+    ctx.ui.notify("No runs found for that scope.", "warning");
+    return;
+  }
+
+  const selectedLabel = await ctx.ui.select(
+    "Select a run",
+    visibleRuns.slice(0, 20).map(formatRunChoiceLabel),
+  );
+  if (!selectedLabel) return;
+
+  const selectedRun = visibleRuns.slice(0, 20).find((run) => formatRunChoiceLabel(run) === selectedLabel);
+  if (!selectedRun) return;
+  ctx.ui.notify(formatRunDetails(selectedRun), selectedRun.error ? "warning" : "info");
+}
+
+async function showMaintenanceMenu(ctx: any) {
+  const gcChoice = await ctx.ui.select("pi-lab maintenance", [
+    "Dry-run current project",
+    "Delete current project old runs (keep last 10)",
+    "Dry-run all global projects",
+  ]);
+  if (!gcChoice) return;
+  let result;
+  if (gcChoice === "Dry-run current project") {
+    result = runAbGcCommand("", ctx.cwd);
+  } else if (gcChoice === "Delete current project old runs (keep last 10)") {
+    const confirmed = await ctx.ui.confirm("Delete old runs?", "This deletes old lab runs for the current project and keeps the newest 10.");
+    if (!confirmed) return;
+    result = runAbGcCommand("--force", ctx.cwd);
+  } else {
+    result = runAbGcCommand("--all-projects", ctx.cwd);
+  }
+  ctx.ui.notify(result.message, result.level === "error" ? "error" : result.level === "warning" ? "warning" : "info");
+}
+
 async function showLabsMenu(ctx: any, experimentDirs?: string[]) {
   const choice = await ctx.ui.select("pi-lab", [
     "Experiments",
-    "Status",
-    "Validate",
-    "GC",
+    "Runs",
+    "Maintenance",
   ]);
 
   if (choice === "Experiments") {
@@ -1324,51 +1461,13 @@ async function showLabsMenu(ctx: any, experimentDirs?: string[]) {
     return;
   }
 
-  if (choice === "Status") {
-    const experiments = loadExperiments(ctx.cwd, { experimentDirs });
-    if (experiments.length === 0) {
-      ctx.ui.notify("No A/B experiments found (global or project).", "warning");
-      return;
-    }
-    const lines = experiments.map(formatExperimentListLine);
-    ctx.ui.notify(lines.join("\n"), "info");
+  if (choice === "Runs") {
+    await showRunsMenu(ctx);
     return;
   }
 
-  if (choice === "Validate") {
-    const experiments = loadExperiments(ctx.cwd, { experimentDirs });
-    if (experiments.length === 0) {
-      ctx.ui.notify("No A/B experiments found (global or project).", "warning");
-      return;
-    }
-    const lines: string[] = [];
-    for (const e of experiments) {
-      lines.push(formatExperimentListLine(e));
-      for (const err of e.validation?.errors ?? []) lines.push(`  - ERROR: ${err}`);
-      for (const warn of e.validation?.warnings ?? []) lines.push(`  - WARN: ${warn}`);
-    }
-    ctx.ui.notify(lines.join("\n"), experiments.some((e) => (e.validation?.errors?.length ?? 0) > 0) ? "warning" : "info");
-    return;
-  }
-
-  if (choice === "GC") {
-    const gcChoice = await ctx.ui.select("pi-lab gc", [
-      "Dry-run current project",
-      "Delete current project old runs (keep last 10)",
-      "Dry-run all global projects",
-    ]);
-    if (!gcChoice) return;
-    let result;
-    if (gcChoice === "Dry-run current project") {
-      result = runAbGcCommand("", ctx.cwd);
-    } else if (gcChoice === "Delete current project old runs (keep last 10)") {
-      const confirmed = await ctx.ui.confirm("Delete old runs?", "This deletes old lab runs for the current project and keeps the newest 10.");
-      if (!confirmed) return;
-      result = runAbGcCommand("--force", ctx.cwd);
-    } else {
-      result = runAbGcCommand("--all-projects", ctx.cwd);
-    }
-    ctx.ui.notify(result.message, result.level === "error" ? "error" : result.level === "warning" ? "warning" : "info");
+  if (choice === "Maintenance") {
+    await showMaintenanceMenu(ctx);
   }
 }
 
@@ -1483,7 +1582,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
           await showLabsMenu(ctx, experimentDirs);
           return;
         }
-        ctx.ui.notify("Usage: /lab (interactive) or /lab status | validate | experiments | gc", "warning");
+        ctx.ui.notify("Usage: /lab (interactive) or /lab experiments | runs | maintenance", "warning");
         return;
       }
 
@@ -1574,13 +1673,23 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
         return;
       }
 
+      if (cmd === "runs") {
+        await showRunsMenu(ctx);
+        return;
+      }
+
+      if (cmd === "maintenance") {
+        await showMaintenanceMenu(ctx);
+        return;
+      }
+
       if (cmd === "gc" || cmd.startsWith("gc ")) {
         const result = runAbGcCommand(cmd.slice(2).trim(), ctx.cwd);
         ctx.ui.notify(result.message, result.level === "error" ? "error" : result.level === "warning" ? "warning" : "info");
         return;
       }
 
-      ctx.ui.notify("Usage: /lab status | validate | experiments | gc", "warning");
+      ctx.ui.notify("Usage: /lab experiments | runs | maintenance", "warning");
     },
   });
 
