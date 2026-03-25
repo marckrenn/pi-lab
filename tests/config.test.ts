@@ -1,8 +1,8 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
-import { canonicalExecutionStrategy, loadExperiments, validateExperimentConfig } from "../pi-extension/ab/config.ts";
+import { canonicalExecutionStrategy, loadExperiments, setExperimentEnabled, validateExperimentConfig } from "../pi-extension/ab/config.ts";
 
 function mkExp(id: string, tool: string, winner: string = "formula") {
   return {
@@ -29,7 +29,7 @@ describe("config strategy canonicalization", () => {
 describe("config loading", () => {
   test("supports extra experiment dirs with project override precedence", () => {
     const cwd = mkdtempSync(join(tmpdir(), "ab-config-extra-"));
-    const projectDir = join(cwd, ".pi", "ab", "experiments");
+    const projectDir = join(cwd, ".pi", "lab", "experiments");
     const packageDir = join(cwd, "pkg-experiments");
     const packageOverrideDir = join(cwd, "pkg-override");
 
@@ -69,6 +69,42 @@ describe("config loading", () => {
     expect(local?.source).toBe("project");
     expect(experiments.some((ex) => ex.experiment.id === "local")).toBe(true);
     expect(experiments.some((ex) => ex.experiment.id === "shadow")).toBe(true);
+  });
+
+  test("loads project experiments from .pi/lab/experiments and lets them override legacy .pi/ab/experiments", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "ab-config-local-lab-"));
+    const legacyDir = join(cwd, ".pi", "ab", "experiments");
+    const labDir = join(cwd, ".pi", "lab", "experiments");
+    mkdirSync(legacyDir, { recursive: true });
+    mkdirSync(labDir, { recursive: true });
+
+    writeFileSync(join(legacyDir, "legacy.json"), JSON.stringify(mkExp("shared", "edit")));
+    writeFileSync(
+      join(labDir, "local.json"),
+      JSON.stringify({
+        ...mkExp("shared", "edit_compare"),
+        winner: { mode: "blend" },
+      }),
+    );
+
+    const experiments = loadExperiments(cwd);
+    expect(experiments).toHaveLength(1);
+    expect(experiments[0]?.source).toBe("project");
+    expect(experiments[0]?.path).toBe(join(labDir, "local.json"));
+    expect(experiments[0]?.experiment.tool.name).toBe("edit_compare");
+  });
+
+  test("can toggle experiment enabled state in-place", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "ab-config-toggle-"));
+    const dir = join(cwd, ".pi", "lab", "experiments");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "toggle.json");
+    writeFileSync(path, JSON.stringify({ ...mkExp("toggle-me", "edit"), enabled: true }, null, 2));
+
+    expect(setExperimentEnabled(path, "toggle-me", false)).toEqual({ found: true, enabled: false });
+    expect(JSON.parse(readFileSync(path, "utf8")).enabled).toBe(false);
+    expect(setExperimentEnabled(path, "toggle-me", true)).toEqual({ found: true, enabled: true });
+    expect(JSON.parse(readFileSync(path, "utf8")).enabled).toBe(true);
   });
 
   test("warns on path regex for proxy strategies", () => {

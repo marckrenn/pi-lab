@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
-import { homedir } from "node:os";
+import { getGlobalLabDir, getProjectLabDir } from "./config.ts";
 
 export interface AbGcOptions {
   keepLast: number;
@@ -108,34 +108,36 @@ export function runAbGcCommand(args: string, cwd: string): AbGcResult {
   }
 
   const options = parsed.options;
-  const runsRoot = join(homedir(), ".pi", "agent", "lab", "runs");
+  const globalLabDir = getGlobalLabDir();
   const defaultProject = basename(cwd);
-  const projectNames = options.allProjects
+
+  const projectScopes = options.allProjects
     ? (() => {
         try {
-          return readdirSync(runsRoot, { withFileTypes: true })
-            .filter((d) => d.isDirectory())
-            .map((d) => d.name)
-            .sort();
+          return readdirSync(globalLabDir, { withFileTypes: true })
+            .filter((d) => d.isDirectory() && d.name !== "experiments")
+            .map((d) => ({ project: d.name, dir: join(globalLabDir, d.name) }))
+            .sort((a, b) => a.project.localeCompare(b.project));
         } catch {
-          return [] as string[];
+          return [] as Array<{ project: string; dir: string }>;
         }
       })()
-    : [options.project ?? defaultProject];
+    : options.project
+      ? [{ project: options.project, dir: join(globalLabDir, options.project) }]
+      : [{ project: defaultProject, dir: getProjectLabDir(cwd) }];
 
   const now = Date.now();
   const deletions: Array<{ project: string; runId: string; path: string; ageMs: number }> = [];
   let scannedRuns = 0;
 
-  for (const projectName of projectNames) {
-    const projectDir = join(runsRoot, projectName);
+  for (const scope of projectScopes) {
     let runEntries: Array<{ runId: string; path: string; ts: number }> = [];
     try {
-      runEntries = readdirSync(projectDir, { withFileTypes: true })
-        .filter((d) => d.isDirectory())
+      runEntries = readdirSync(scope.dir, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && d.name !== "experiments")
         .map((d) => {
           const runId = d.name;
-          const path = join(projectDir, runId);
+          const path = join(scope.dir, runId);
           return { runId, path, ts: parseRunTimestampMs(path, runId) };
         })
         .sort((a, b) => b.ts - a.ts);
@@ -150,7 +152,7 @@ export function runAbGcCommand(args: string, cwd: string): AbGcResult {
       if (protectedSet.has(run.runId)) continue;
       const ageMs = Math.max(0, now - run.ts);
       if (options.olderThanMs != null && ageMs < options.olderThanMs) continue;
-      deletions.push({ project: projectName, runId: run.runId, path: run.path, ageMs });
+      deletions.push({ project: scope.project, runId: run.runId, path: run.path, ageMs });
     }
   }
 

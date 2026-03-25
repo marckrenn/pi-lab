@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type {
@@ -164,11 +164,23 @@ function collectExtraExperimentFiles(cwd: string, dirs?: string[]): ExtraExperim
   return sources;
 }
 
+export function getGlobalLabDir(): string {
+  return join(homedir(), ".pi", "agent", "lab");
+}
+
+export function getProjectLabDir(cwd: string): string {
+  return join(cwd, ".pi", "lab");
+}
+
 export function getGlobalExperimentsDir(): string {
-  return join(homedir(), ".pi", "agent", "lab", "experiments");
+  return join(getGlobalLabDir(), "experiments");
 }
 
 export function getProjectExperimentsDir(cwd: string): string {
+  return join(getProjectLabDir(cwd), "experiments");
+}
+
+export function getLegacyProjectExperimentsDir(cwd: string): string {
   return join(cwd, ".pi", "ab", "experiments");
 }
 
@@ -218,7 +230,10 @@ export function getHardcodedWinnerLaneId(experiment: AbExperiment): string {
 
 export function loadExperiments(cwd: string, options?: ExperimentLoadOptions): LoadedExperiment[] {
   const globalFiles = listExperimentFiles(getGlobalExperimentsDir());
-  const projectFiles = listExperimentFiles(getProjectExperimentsDir(cwd));
+  const projectFiles = [
+    ...listExperimentFiles(getLegacyProjectExperimentsDir(cwd)),
+    ...listExperimentFiles(getProjectExperimentsDir(cwd)),
+  ];
   const packageSources = collectExtraExperimentFiles(cwd, options?.experimentDirs);
 
   const merged = new Map<string, LoadedExperiment>();
@@ -274,6 +289,47 @@ export function loadExperiments(cwd: string, options?: ExperimentLoadOptions): L
   }
 
   return [...merged.values()];
+}
+
+function updateEnabledFlagInRaw(raw: any, experimentId: string, enabled: boolean): boolean {
+  if (!raw) return false;
+
+  if (Array.isArray(raw)) {
+    let changed = false;
+    for (const entry of raw) {
+      changed = updateEnabledFlagInRaw(entry, experimentId, enabled) || changed;
+    }
+    return changed;
+  }
+
+  if (Array.isArray(raw.experiments)) {
+    let changed = false;
+    for (const entry of raw.experiments) {
+      changed = updateEnabledFlagInRaw(entry, experimentId, enabled) || changed;
+    }
+    return changed;
+  }
+
+  if (typeof raw.id === "string" && raw.id === experimentId) {
+    raw.enabled = enabled;
+    return true;
+  }
+
+  return false;
+}
+
+export function setExperimentEnabled(path: string, experimentId: string, enabled: boolean): {
+  found: boolean;
+  enabled: boolean;
+} {
+  const raw = JSON.parse(readFileSync(path, "utf8"));
+  const found = updateEnabledFlagInRaw(raw, experimentId, enabled);
+  if (!found) {
+    return { found: false, enabled };
+  }
+
+  writeFileSync(path, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+  return { found: true, enabled };
 }
 
 export function canonicalExecutionStrategy(

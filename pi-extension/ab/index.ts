@@ -22,10 +22,11 @@ import {
   loadExperiments,
   selectExperimentForEdit,
   selectExperimentForTool,
+  setExperimentEnabled,
   toolNameOf,
   winnerModeOf,
 } from "./config.ts";
-import { createRunContext, writeLaneRecords, writeRunManifest } from "./storage.ts";
+import { createRunContext, pruneEmptyRunScaffolding, writeLaneRecords, writeRunManifest } from "./storage.ts";
 import {
   applyPatchToMain,
   detectGitRepository,
@@ -627,7 +628,7 @@ async function runFixedArgsToolExperiment(
   const experiment = loaded.experiment;
   cooldownState.set(experiment.id, now);
 
-  const run = createRunContext(ctx.cwd);
+  const run = createRunContext(ctx.cwd, loaded.source);
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
@@ -812,6 +813,7 @@ async function runFixedArgsToolExperiment(
     throw err;
   } finally {
     updateLaneWidget(ctx, laneStatusKey, experiment.id, undefined);
+    pruneEmptyRunScaffolding(run);
   }
 }
 
@@ -837,7 +839,7 @@ async function runSingleCallFlowExperiment(
   const experiment = loaded.experiment;
   cooldownState.set(experiment.id, now);
 
-  const run = createRunContext(ctx.cwd);
+  const run = createRunContext(ctx.cwd, loaded.source);
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
@@ -989,6 +991,7 @@ async function runSingleCallFlowExperiment(
     throw err;
   } finally {
     updateLaneWidget(ctx, laneStatusKey, experiment.id, undefined);
+    pruneEmptyRunScaffolding(run);
   }
 }
 
@@ -1014,7 +1017,7 @@ async function runMultiCallFlowExperiment(
   const experiment = loaded.experiment;
   cooldownState.set(experiment.id, now);
 
-  const run = createRunContext(ctx.cwd);
+  const run = createRunContext(ctx.cwd, loaded.source);
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
@@ -1200,7 +1203,17 @@ async function runMultiCallFlowExperiment(
     throw err;
   } finally {
     updateLaneWidget(ctx, laneStatusKey, experiment.id, undefined);
+    pruneEmptyRunScaffolding(run);
   }
+}
+
+function formatExperimentEnabledBadge(loaded: { experiment: { enabled?: boolean } }): string {
+  return loaded.experiment.enabled === false ? "off" : "on";
+}
+
+function formatExperimentListLine(loaded: ReturnType<typeof loadExperiments>[number]): string {
+  const toggleHint = loaded.source === "project" || loaded.source === "global" ? "toggleable" : "read-only";
+  return `• [${formatExperimentEnabledBadge(loaded)}] ${formatExperimentSummary(loaded)} · ${toggleHint}`;
 }
 
 function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]) {
@@ -1305,12 +1318,12 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
   });
 
   pi.registerCommand("lab", {
-    description: "pi-lab controls: /lab status | validate | gc",
+    description: "pi-lab controls: /lab status | validate | experiments | gc",
     handler: async (args, ctx) => {
       const cmd = (args ?? "").trim();
 
       if (!cmd) {
-        ctx.ui.notify("Usage: /lab status | validate | gc", "warning");
+        ctx.ui.notify("Usage: /lab status | validate | experiments | gc", "warning");
         return;
       }
 
@@ -1343,13 +1356,71 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
         return;
       }
 
+      if (cmd === "experiments" || cmd.startsWith("experiments ")) {
+        const experiments = loadExperiments(ctx.cwd, { experimentDirs });
+        const rest = cmd.slice("experiments".length).trim();
+
+        if (experiments.length === 0) {
+          ctx.ui.notify("No A/B experiments found (global or project).", "warning");
+          return;
+        }
+
+        if (!rest || rest === "list") {
+          const local = experiments.filter((e) => e.source === "project");
+          const global = experiments.filter((e) => e.source === "global");
+          const other = experiments.filter((e) => e.source !== "project" && e.source !== "global");
+          const lines: string[] = [];
+          lines.push("Local experiments:");
+          lines.push(...(local.length > 0 ? local.map(formatExperimentListLine) : ["• none"]));
+          lines.push("", "Global experiments:");
+          lines.push(...(global.length > 0 ? global.map(formatExperimentListLine) : ["• none"]));
+          if (other.length > 0) {
+            lines.push("", "Other experiment sources:");
+            lines.push(...other.map(formatExperimentListLine));
+          }
+          lines.push("", "Usage: /lab experiments toggle <id> | on <id> | off <id>");
+          ctx.ui.notify(lines.join("\n"), "info");
+          return;
+        }
+
+        const [actionRaw, ...idParts] = rest.split(/\s+/).filter(Boolean);
+        const action = (actionRaw ?? "").toLowerCase();
+        const experimentId = idParts.join(" ").trim();
+        if (!["toggle", "on", "off", "enable", "disable"].includes(action) || !experimentId) {
+          ctx.ui.notify("Usage: /lab experiments [list] | toggle <id> | on <id> | off <id>", "warning");
+          return;
+        }
+
+        const target = experiments.find((e) => e.experiment.id === experimentId);
+        if (!target) {
+          ctx.ui.notify(`Experiment '${experimentId}' not found.`, "warning");
+          return;
+        }
+        if (target.source !== "project" && target.source !== "global") {
+          ctx.ui.notify(`Experiment '${experimentId}' comes from ${target.source} and is read-only here.`, "warning");
+          return;
+        }
+
+        const nextEnabled = action === "toggle"
+          ? target.experiment.enabled === false
+          : action === "on" || action === "enable";
+        const result = setExperimentEnabled(target.path, target.experiment.id, nextEnabled);
+        if (!result.found) {
+          ctx.ui.notify(`Experiment '${experimentId}' was not found in ${target.path}.`, "error");
+          return;
+        }
+
+        ctx.ui.notify(`Experiment '${experimentId}' is now ${result.enabled ? "enabled" : "disabled"}.`, "info");
+        return;
+      }
+
       if (cmd === "gc" || cmd.startsWith("gc ")) {
         const result = runAbGcCommand(cmd.slice(2).trim(), ctx.cwd);
         ctx.ui.notify(result.message, result.level === "error" ? "error" : result.level === "warning" ? "warning" : "info");
         return;
       }
 
-      ctx.ui.notify("Usage: /lab status | validate | gc", "warning");
+      ctx.ui.notify("Usage: /lab status | validate | experiments | gc", "warning");
     },
   });
 
@@ -1384,7 +1455,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
       const experiment = loaded.experiment;
       cooldownState.set(experiment.id, now);
 
-      const run = createRunContext(ctx.cwd);
+      const run = createRunContext(ctx.cwd, loaded.source);
       writeRunManifest(run, experiment, {
         source: loaded.source,
         config_path: loaded.path,
@@ -1647,6 +1718,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
         throw err;
       } finally {
         updateLaneWidget(ctx, laneStatusKey, experiment.id, undefined);
+        pruneEmptyRunScaffolding(run);
       }
     },
   });
