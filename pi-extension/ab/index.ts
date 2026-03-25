@@ -11,8 +11,18 @@ import {
   createLsTool,
   createReadTool,
   createWriteTool,
+  getSettingsListTheme,
 } from "@mariozechner/pi-coding-agent";
-import { Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+import {
+  Container,
+  SettingsList,
+  Spacer,
+  Text,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+  type SettingItem,
+} from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { getBaselineLaneId } from "./selection.ts";
 import {
@@ -1216,6 +1226,152 @@ function formatExperimentListLine(loaded: ReturnType<typeof loadExperiments>[num
   return `• [${formatExperimentEnabledBadge(loaded)}] ${formatExperimentSummary(loaded)} · ${toggleHint}`;
 }
 
+function experimentSourceLabel(source: string): string {
+  if (source === "project") return "local";
+  if (source === "global") return "global";
+  return source.replace(/^package:/, "pkg:");
+}
+
+function experimentUiDescription(loaded: ReturnType<typeof loadExperiments>[number]): string {
+  const validation = loaded.validation;
+  const parts = [
+    `source: ${experimentSourceLabel(loaded.source)}`,
+    `path: ${loaded.path}`,
+    `tool: ${toolNameOf(loaded.experiment)}`,
+    `winner: ${winnerModeOf(loaded.experiment)}`,
+    `strategy: ${canonicalExecutionStrategy(executionStrategyOf(loaded.experiment))}`,
+  ];
+  const errors = validation?.errors ?? [];
+  const warnings = validation?.warnings ?? [];
+  if (errors.length > 0) parts.push(`errors: ${errors.join(" | ")}`);
+  if (warnings.length > 0) parts.push(`warnings: ${warnings.join(" | ")}`);
+  return parts.join("\n");
+}
+
+async function showExperimentsManager(ctx: any, experimentDirs?: string[]) {
+  const experiments = loadExperiments(ctx.cwd, { experimentDirs });
+  if (experiments.length === 0) {
+    ctx.ui.notify("No A/B experiments found (global or project).", "warning");
+    return;
+  }
+
+  await ctx.ui.custom((tui: any, theme: any, _kb: any, done: (value?: unknown) => void) => {
+    const container = new Container();
+    container.addChild(new Text(theme.fg("accent", theme.bold("pi-lab experiments")), 0, 0));
+    container.addChild(new Spacer(1));
+
+    const items: SettingItem[] = experiments.map((loaded) => {
+      const toggleable = loaded.source === "project" || loaded.source === "global";
+      return {
+        id: loaded.experiment.id,
+        label: `${loaded.experiment.id} [${experimentSourceLabel(loaded.source)}]`,
+        description: experimentUiDescription(loaded),
+        currentValue: loaded.experiment.enabled === false ? "disabled" : "enabled",
+        values: toggleable ? ["enabled", "disabled"] : undefined,
+      } satisfies SettingItem;
+    });
+
+    const settingsList = new SettingsList(
+      items,
+      Math.min(Math.max(items.length + 2, 6), 16),
+      getSettingsListTheme(),
+      (id, newValue) => {
+        const target = experiments.find((e) => e.experiment.id === id);
+        if (!target || (target.source !== "project" && target.source !== "global")) {
+          ctx.ui.notify(`Experiment '${id}' is read-only.`, "warning");
+          return;
+        }
+        const enabled = newValue === "enabled";
+        const result = setExperimentEnabled(target.path, target.experiment.id, enabled);
+        if (!result.found) {
+          ctx.ui.notify(`Experiment '${id}' was not found in ${target.path}.`, "error");
+          return;
+        }
+        target.experiment.enabled = enabled;
+        ctx.ui.notify(`Experiment '${id}' ${enabled ? "enabled" : "disabled"}.`, "info");
+      },
+      () => done(undefined),
+      { enableSearch: true },
+    );
+
+    container.addChild(settingsList);
+
+    return {
+      render(width: number) {
+        return container.render(width);
+      },
+      invalidate() {
+        container.invalidate();
+      },
+      handleInput(data: string) {
+        settingsList.handleInput?.(data);
+        tui.requestRender();
+      },
+    };
+  });
+}
+
+async function showLabsMenu(ctx: any, experimentDirs?: string[]) {
+  const choice = await ctx.ui.select("pi-lab", [
+    "Experiments",
+    "Status",
+    "Validate",
+    "GC",
+  ]);
+
+  if (choice === "Experiments") {
+    await showExperimentsManager(ctx, experimentDirs);
+    return;
+  }
+
+  if (choice === "Status") {
+    const experiments = loadExperiments(ctx.cwd, { experimentDirs });
+    if (experiments.length === 0) {
+      ctx.ui.notify("No A/B experiments found (global or project).", "warning");
+      return;
+    }
+    const lines = experiments.map(formatExperimentListLine);
+    ctx.ui.notify(lines.join("\n"), "info");
+    return;
+  }
+
+  if (choice === "Validate") {
+    const experiments = loadExperiments(ctx.cwd, { experimentDirs });
+    if (experiments.length === 0) {
+      ctx.ui.notify("No A/B experiments found (global or project).", "warning");
+      return;
+    }
+    const lines: string[] = [];
+    for (const e of experiments) {
+      lines.push(formatExperimentListLine(e));
+      for (const err of e.validation?.errors ?? []) lines.push(`  - ERROR: ${err}`);
+      for (const warn of e.validation?.warnings ?? []) lines.push(`  - WARN: ${warn}`);
+    }
+    ctx.ui.notify(lines.join("\n"), experiments.some((e) => (e.validation?.errors?.length ?? 0) > 0) ? "warning" : "info");
+    return;
+  }
+
+  if (choice === "GC") {
+    const gcChoice = await ctx.ui.select("pi-lab gc", [
+      "Dry-run current project",
+      "Delete current project old runs (keep last 10)",
+      "Dry-run all global projects",
+    ]);
+    if (!gcChoice) return;
+    let result;
+    if (gcChoice === "Dry-run current project") {
+      result = runAbGcCommand("", ctx.cwd);
+    } else if (gcChoice === "Delete current project old runs (keep last 10)") {
+      const confirmed = await ctx.ui.confirm("Delete old runs?", "This deletes old lab runs for the current project and keeps the newest 10.");
+      if (!confirmed) return;
+      result = runAbGcCommand("--force", ctx.cwd);
+    } else {
+      result = runAbGcCommand("--all-projects", ctx.cwd);
+    }
+    ctx.ui.notify(result.message, result.level === "error" ? "error" : result.level === "warning" ? "warning" : "info");
+  }
+}
+
 function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]) {
   const cooldownState = new Map<string, number>();
   const defaultEditToolRenderer = createEditTool(process.cwd());
@@ -1318,12 +1474,16 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
   });
 
   pi.registerCommand("lab", {
-    description: "pi-lab controls: /lab status | validate | experiments | gc",
+    description: "pi-lab controls with interactive menus and subcommands: /lab",
     handler: async (args, ctx) => {
       const cmd = (args ?? "").trim();
 
       if (!cmd) {
-        ctx.ui.notify("Usage: /lab status | validate | experiments | gc", "warning");
+        if (ctx.hasUI) {
+          await showLabsMenu(ctx, experimentDirs);
+          return;
+        }
+        ctx.ui.notify("Usage: /lab (interactive) or /lab status | validate | experiments | gc", "warning");
         return;
       }
 
