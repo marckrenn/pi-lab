@@ -5,7 +5,7 @@ import { createEditTool } from "@mariozechner/pi-coding-agent";
 import type { LoadedExperiment, LaneConfig, LaneHarnessFallbackReason, LaneRunRecord } from "./types.ts";
 import { canonicalExecutionStrategy, debugEnabledOf, debugUiOf, executionStrategyOf, resolveConfiguredPath, timeoutMsOf } from "./config.ts";
 import type { RunContext } from "./storage.ts";
-import { extractFirstJsonObject, runCommand, safeJsonParse } from "./utils.ts";
+import { extractFirstJsonObject, modelToCli, runCommand, safeJsonParse } from "./utils.ts";
 import {
   closeCmuxSurface,
   closeCmuxSurfacesByTitlePrefix,
@@ -461,11 +461,16 @@ function laneSingleCallPrompt(
     .join("\n");
 }
 
-export function resolveLaneModelOverride(lane: LaneConfig, inheritedModel?: string): string | undefined {
-  return lane.model?.trim() || inheritedModel?.trim() || undefined;
+export function resolveLaneModelOverride(
+  lane: LaneConfig,
+  inheritedModel?: string | { provider?: string; id?: string },
+): string | undefined {
+  if (lane.model?.trim()) return lane.model.trim();
+  if (typeof inheritedModel === "string") return inheritedModel.trim() || undefined;
+  return modelToCli(inheritedModel);
 }
 
-function appendLaneModelArg(piArgs: string[], lane: LaneConfig, inheritedModel?: string): void {
+function appendLaneModelArg(piArgs: string[], lane: LaneConfig, inheritedModel?: string | { provider?: string; id?: string }): void {
   const model = resolveLaneModelOverride(lane, inheritedModel);
   if (!model) return;
   piArgs.push("--model", model);
