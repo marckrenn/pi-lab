@@ -1,3 +1,5 @@
+![pi-lab banner](./docs/assets/banner.png)
+
 # @marckrenn/pi-lab
 
 `pi-lab` lets you run multiple **extension-backed lane bundles** behind one tool call, compare them safely in isolation, and proceed with one selected result.
