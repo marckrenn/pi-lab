@@ -1400,74 +1400,81 @@ async function showRunsMenu(ctx: any) {
     return;
   }
 
-  const scopeChoice = await ctx.ui.select("pi-lab runs", [
-    `Recent local runs (${runs.filter((r) => r.scope === "local").length})`,
-    `Recent global runs (${runs.filter((r) => r.scope === "global").length})`,
-    `All recent runs (${runs.length})`,
-  ]);
-  if (!scopeChoice) return;
+  while (true) {
+    const scopeChoice = await ctx.ui.select("pi-lab runs", [
+      `Recent local runs (${runs.filter((r) => r.scope === "local").length})`,
+      `Recent global runs (${runs.filter((r) => r.scope === "global").length})`,
+      `All recent runs (${runs.length})`,
+    ]);
+    if (!scopeChoice) return;
 
-  const visibleRuns = scopeChoice.startsWith("Recent local")
-    ? runs.filter((r) => r.scope === "local")
-    : scopeChoice.startsWith("Recent global")
-      ? runs.filter((r) => r.scope === "global")
-      : runs;
+    const visibleRuns = scopeChoice.startsWith("Recent local")
+      ? runs.filter((r) => r.scope === "local")
+      : scopeChoice.startsWith("Recent global")
+        ? runs.filter((r) => r.scope === "global")
+        : runs;
 
-  if (visibleRuns.length === 0) {
-    ctx.ui.notify("No runs found for that scope.", "warning");
-    return;
+    if (visibleRuns.length === 0) {
+      ctx.ui.notify("No runs found for that scope.", "warning");
+      continue;
+    }
+
+    const selectedLabel = await ctx.ui.select(
+      "Select a run",
+      visibleRuns.slice(0, 20).map(formatRunChoiceLabel),
+    );
+    if (!selectedLabel) continue;
+
+    const selectedRun = visibleRuns.slice(0, 20).find((run) => formatRunChoiceLabel(run) === selectedLabel);
+    if (!selectedRun) continue;
+    ctx.ui.notify(formatRunDetails(selectedRun), selectedRun.error ? "warning" : "info");
   }
-
-  const selectedLabel = await ctx.ui.select(
-    "Select a run",
-    visibleRuns.slice(0, 20).map(formatRunChoiceLabel),
-  );
-  if (!selectedLabel) return;
-
-  const selectedRun = visibleRuns.slice(0, 20).find((run) => formatRunChoiceLabel(run) === selectedLabel);
-  if (!selectedRun) return;
-  ctx.ui.notify(formatRunDetails(selectedRun), selectedRun.error ? "warning" : "info");
 }
 
 async function showMaintenanceMenu(ctx: any) {
-  const gcChoice = await ctx.ui.select("pi-lab maintenance", [
-    "Dry-run current project",
-    "Delete current project old runs (keep last 10)",
-    "Dry-run all global projects",
-  ]);
-  if (!gcChoice) return;
-  let result;
-  if (gcChoice === "Dry-run current project") {
-    result = runAbGcCommand("", ctx.cwd);
-  } else if (gcChoice === "Delete current project old runs (keep last 10)") {
-    const confirmed = await ctx.ui.confirm("Delete old runs?", "This deletes old lab runs for the current project and keeps the newest 10.");
-    if (!confirmed) return;
-    result = runAbGcCommand("--force", ctx.cwd);
-  } else {
-    result = runAbGcCommand("--all-projects", ctx.cwd);
+  while (true) {
+    const gcChoice = await ctx.ui.select("pi-lab maintenance", [
+      "Delete old runs for this project (keep newest 10)",
+      "Preview cleanup for this project",
+      "Preview cleanup for all global projects",
+    ]);
+    if (!gcChoice) return;
+    let result;
+    if (gcChoice === "Preview cleanup for this project") {
+      result = runAbGcCommand("", ctx.cwd);
+    } else if (gcChoice === "Delete old runs for this project (keep newest 10)") {
+      const confirmed = await ctx.ui.confirm("Delete old runs?", "This deletes old lab runs for the current project and keeps the newest 10.");
+      if (!confirmed) continue;
+      result = runAbGcCommand("--force", ctx.cwd);
+    } else {
+      result = runAbGcCommand("--all-projects", ctx.cwd);
+    }
+    ctx.ui.notify(result.message, result.level === "error" ? "error" : result.level === "warning" ? "warning" : "info");
   }
-  ctx.ui.notify(result.message, result.level === "error" ? "error" : result.level === "warning" ? "warning" : "info");
 }
 
 async function showLabsMenu(ctx: any, experimentDirs?: string[]) {
-  const choice = await ctx.ui.select("pi-lab", [
-    "Experiments",
-    "Runs",
-    "Maintenance",
-  ]);
+  while (true) {
+    const choice = await ctx.ui.select("pi-lab", [
+      "Experiments",
+      "Runs",
+      "Maintenance",
+    ]);
+    if (!choice) return;
 
-  if (choice === "Experiments") {
-    await showExperimentsManager(ctx, experimentDirs);
-    return;
-  }
+    if (choice === "Experiments") {
+      await showExperimentsManager(ctx, experimentDirs);
+      continue;
+    }
 
-  if (choice === "Runs") {
-    await showRunsMenu(ctx);
-    return;
-  }
+    if (choice === "Runs") {
+      await showRunsMenu(ctx);
+      continue;
+    }
 
-  if (choice === "Maintenance") {
-    await showMaintenanceMenu(ctx);
+    if (choice === "Maintenance") {
+      await showMaintenanceMenu(ctx);
+    }
   }
 }
 
@@ -1573,7 +1580,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
   });
 
   pi.registerCommand("lab", {
-    description: "pi-lab controls with interactive menus and subcommands: /lab",
+    description: "Manage pi-lab experiments and runs",
     handler: async (args, ctx) => {
       const cmd = (args ?? "").trim();
 
