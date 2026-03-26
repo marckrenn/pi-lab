@@ -13,6 +13,8 @@
 > [![GitHub Sponsors](https://img.shields.io/badge/GitHub-Sponsors-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/marckrenn)
 > [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/marckrenn)
 
+https://github.com/user-attachments/assets/52f5db80-fbbc-4bab-abe6-7dec8b41b165
+
 ## Use it when you want to
 
 - compare permutations of a tool or extension
