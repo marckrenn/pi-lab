@@ -1250,7 +1250,7 @@ function experimentUiDescription(loaded: ReturnType<typeof loadExperiments>[numb
   return parts.join("\n");
 }
 
-async function showExperimentsManager(ctx: any, experimentDirs?: string[]) {
+async function showExistingExperimentsManager(ctx: any, experimentDirs?: string[]) {
   const experiments = loadExperiments(ctx.cwd, { experimentDirs });
   if (experiments.length === 0) {
     ctx.ui.notify("No lab experiments found (global or project).", "warning");
@@ -1311,6 +1311,23 @@ async function showExperimentsManager(ctx: any, experimentDirs?: string[]) {
       },
     };
   });
+}
+
+async function showExperimentsManager(pi: ExtensionAPI, ctx: any, experimentDirs?: string[]) {
+  while (true) {
+    const choice = await ctx.ui.select("pi-lab experiments", [
+      "Create experiment",
+      "Manage existing experiments",
+    ]);
+    if (!choice) return;
+
+    if (choice === "Create experiment") {
+      await runCreateExperimentWizard(pi, ctx);
+      continue;
+    }
+
+    await showExistingExperimentsManager(ctx, experimentDirs);
+  }
 }
 
 type LabRunSummary = {
@@ -1782,7 +1799,7 @@ async function runCreateExperimentWizard(pi: ExtensionAPI, ctx: any, initialTarg
   ctx.ui.notify("Queued the lab setup brief as a follow-up.", "info");
 }
 
-async function showLabsMenu(ctx: any, experimentDirs?: string[]) {
+async function showLabsMenu(pi: ExtensionAPI, ctx: any, experimentDirs?: string[]) {
   while (true) {
     const choice = await ctx.ui.select("pi-lab", [
       "Experiments",
@@ -1792,7 +1809,7 @@ async function showLabsMenu(ctx: any, experimentDirs?: string[]) {
     if (!choice) return;
 
     if (choice === "Experiments") {
-      await showExperimentsManager(ctx, experimentDirs);
+      await showExperimentsManager(pi, ctx, experimentDirs);
       continue;
     }
 
@@ -1915,7 +1932,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
 
       if (!cmd) {
         if (ctx.hasUI) {
-          await showLabsMenu(ctx, experimentDirs);
+          await showLabsMenu(pi, ctx, experimentDirs);
           return;
         }
         ctx.ui.notify("Usage: /lab (interactive) or /lab create | experiments | runs | maintenance", "warning");
