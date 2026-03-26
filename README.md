@@ -81,7 +81,7 @@ That means:
 `/lab` is the built-in control surface for pi-lab.
 
 - `/lab` opens the interactive menu
-- `/lab create` opens the guided experiment setup flow
+- `/lab create` injects an experiment-setup kickoff into the normal conversation
 - the menu has **Experiments**, **Runs**, and **Maintenance**
 - text commands like `/lab experiments`, `/lab runs`, `/lab status`, `/lab validate`, and `/lab gc ...` also work
 
