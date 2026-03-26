@@ -112,6 +112,16 @@ export interface LaneRunRecord {
   lane_harness_used?: "direct" | "pi_prompt";
   lane_harness_requested?: "direct" | "pi_prompt";
   lane_harness_fallback_reason?: LaneHarnessFallbackReason;
+  tool_call_count?: number;
+  total_tool_call_count?: number;
+  target_tool_call_count?: number;
+  custom_tool_call_count?: number;
+}
+
+export interface LaneScore {
+  lane_id: string;
+  score: number;
+  reason?: string;
 }
 
 export interface WinnerSelection {
@@ -122,4 +132,6 @@ export interface WinnerSelection {
   fallback_reason_code?: string;
   llm_error?: string;
   llm_error_code?: string;
+  scores?: LaneScore[];
+  score_source?: string;
 }

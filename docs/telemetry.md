@@ -46,6 +46,7 @@ Each lane record in `lanes/<lane-id>.json` includes lane-level status and metric
 - success/error status
 - latency
 - token counts when available
+- tool call counts (`tool_call_count`, plus strategy-specific variants like `target_tool_call_count` / `custom_tool_call_count`)
 - harness information for `fixed_args`
 - fallback reason details when direct harness execution fell back
 

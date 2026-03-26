@@ -47,6 +47,9 @@ describe("project run jsonl logging", () => {
       status: "success",
       latency_ms: 12,
       output_text: "ok",
+      tool_call_count: 3,
+      total_tool_call_count: 3,
+      custom_tool_call_count: 2,
     };
     writeLaneRecords(run, [lane]);
 
@@ -63,5 +66,7 @@ describe("project run jsonl logging", () => {
     expect(lines[1].kind).toBe("lane_record");
     expect(lines[1].lane_id).toBe("baseline");
     expect(lines[1].record.status).toBe("success");
+    expect(lines[1].record.tool_call_count).toBe(3);
+    expect(lines[1].record.custom_tool_call_count).toBe(2);
   });
 });

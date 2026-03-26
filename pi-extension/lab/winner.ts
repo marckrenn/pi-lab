@@ -1,7 +1,41 @@
 import { blendConfigOf, getBaselineLaneId, getHardcodedWinnerLaneId, toolNameOf, winnerModeOf } from "./config.ts";
-import { chooseFormulaLane, rankFormulaLanes, type ExtraMetricsByLane } from "./selection.ts";
+import { chooseFormulaLane, normalizedScoresFromRanking, rankFormulaLanes, type ExtraMetricsByLane } from "./selection.ts";
 import { runGradingProcess } from "./grading.ts";
-import type { LabExperiment, LaneRunRecord, LoadedExperiment, WinnerSelection } from "./types.ts";
+import type { LabExperiment, LaneRunRecord, LoadedExperiment, LaneScore, WinnerSelection } from "./types.ts";
+
+function orderScoresByLaneList(allLanes: LaneRunRecord[], scores: LaneScore[]): LaneScore[] {
+  const byLane = new Map(scores.map((item) => [item.lane_id, item]));
+  return allLanes.map((lane) => byLane.get(lane.lane_id) ?? { lane_id: lane.lane_id, score: 0 });
+}
+
+function rankedLaneScores(
+  allLanes: LaneRunRecord[],
+  ranking: Parameters<typeof normalizedScoresFromRanking>[0],
+): LaneScore[] {
+  return orderScoresByLaneList(allLanes, normalizedScoresFromRanking(ranking));
+}
+
+function llmLaneScores(
+  allLanes: LaneRunRecord[],
+  scores?: Array<{ lane_id: string; score: number; reason?: string }>,
+): LaneScore[] {
+  const normalized = (scores ?? [])
+    .filter((item) => Number.isFinite(item.score))
+    .map((item) => ({
+      lane_id: item.lane_id,
+      score: Math.max(0, Math.min(1, item.score)),
+      reason: item.reason,
+    }));
+  return orderScoresByLaneList(allLanes, normalized);
+}
+
+function overlayScores(base: LaneScore[], overrides?: Map<string, number>): LaneScore[] {
+  if (!overrides || overrides.size === 0) return base;
+  return base.map((item) => ({
+    ...item,
+    ...(overrides.has(item.lane_id) ? { score: overrides.get(item.lane_id) ?? item.score } : {}),
+  }));
+}
 
 export function defaultPolicy(experiment: LoadedExperiment["experiment"]) {
   const fp = experiment.failure_policy ?? {};
@@ -28,6 +62,7 @@ function formulaFallback(
   records: LaneRunRecord[],
   llmError: { error?: string; error_code?: string },
   modeUsed: WinnerSelection["mode_used"],
+  scores?: WinnerSelection["scores"],
 ): WinnerSelection {
   const experiment = loaded.experiment;
   const policy = defaultPolicy(experiment);
@@ -39,6 +74,7 @@ function formulaFallback(
       winner_lane_id: picked.laneId,
       mode_used: modeUsed,
       reason: `llm fallback: ${picked.reason}`,
+      scores,
       selection_source: "llm_fallback_formula",
       fallback_reason_code: llmError.error_code ?? "llm_no_result",
       llm_error: llmError.error,
@@ -50,6 +86,7 @@ function formulaFallback(
     winner_lane_id: baselineLaneId,
     mode_used: modeUsed,
     reason: "llm failed; fallback baseline lane",
+    scores,
     selection_source: "llm_fallback_baseline",
     fallback_reason_code: llmError.error_code ?? "llm_no_result",
     llm_error: llmError.error,
@@ -63,9 +100,7 @@ function blendFinalScoringExperiment(
   llmWeight: number,
 ): LabExperiment {
   const blend = blendConfigOf(experiment);
-  const objective =
-    blend.objective ??
-    `max({formula_score} * ${formulaWeight} + {llm_score} * ${llmWeight})`;
+  const objective = blend.objective ?? `max({formula_score} * ${formulaWeight} + {llm_score} * ${llmWeight})`;
   const tieBreakers = blend.tie_breakers ?? ["max(llm_score)", "max(formula_score)"];
 
   return {
@@ -108,6 +143,7 @@ async function selectBlendWinner(
         winner_lane_id: formulaWinner.lane_id,
         mode_used: "blend",
         reason: `blend llm_tiebreaker: no formula tie (${ranking.reason})`,
+        scores: rankedLaneScores(records, ranking),
         selection_source: "blend_formula_no_tie",
       };
     }
@@ -117,15 +153,22 @@ async function selectBlendWinner(
     const gradeWinnerUsable = gradeWinner ? success.some((r) => r.lane_id === gradeWinner) : false;
 
     if (grade.result && gradeWinner && gradeWinnerUsable) {
+      const llmScores = new Map<string, number>();
+      for (const item of grade.result.scores ?? []) {
+        if (!Number.isFinite(item.score)) continue;
+        llmScores.set(item.lane_id, Math.max(0, Math.min(1, item.score)));
+      }
+
       return {
         winner_lane_id: gradeWinner,
         mode_used: "blend",
         reason: `blend llm_tiebreaker winner among ${tieGroup.length} tied lanes`,
+        scores: overlayScores(rankedLaneScores(records, ranking), llmScores),
         selection_source: "blend_llm_tiebreaker",
       };
     }
 
-    return formulaFallback(loaded, records, grade, "blend");
+    return formulaFallback(loaded, records, grade, "blend", rankedLaneScores(records, ranking));
   }
 
   const grade = await runGradingProcess(loaded, run, cwd, success, gradingContext, model, signal);
@@ -133,25 +176,16 @@ async function selectBlendWinner(
 
   for (const item of grade.result?.scores ?? []) {
     if (!Number.isFinite(item.score)) continue;
-    const clamped = Math.max(0, Math.min(1, item.score));
-    llmScores.set(item.lane_id, clamped);
+    llmScores.set(item.lane_id, Math.max(0, Math.min(1, item.score)));
   }
 
   if (!grade.result || llmScores.size === 0) {
-    return formulaFallback(loaded, records, grade, "blend");
+    return formulaFallback(loaded, records, grade, "blend", rankedLaneScores(records, ranking));
   }
 
   const formulaOrder = ranking.sorted;
-  const formulaScores = new Map<string, number>();
-  if (formulaOrder.length <= 1) {
-    if (formulaOrder[0]) formulaScores.set(formulaOrder[0].lane_id, 1);
-  } else {
-    const maxIndex = formulaOrder.length - 1;
-    formulaOrder.forEach((lane, index) => {
-      const score = 1 - index / maxIndex;
-      formulaScores.set(lane.lane_id, score);
-    });
-  }
+  const formulaBaseScores = rankedLaneScores(records, ranking);
+  const formulaScores = new Map<string, number>(formulaBaseScores.map((entry) => [entry.lane_id, entry.score]));
 
   const formulaWeight = Number.isFinite(blend.formula_weight) ? Number(blend.formula_weight) : 1;
   const llmWeight = Number.isFinite(blend.llm_weight) ? Number(blend.llm_weight) : 1;
@@ -172,13 +206,14 @@ async function selectBlendWinner(
     return formulaFallback(loaded, records, {
       error: "blend llm_score produced no winner",
       error_code: "llm_output_invalid_schema",
-    }, "blend");
+    }, "blend", rankedLaneScores(records, ranking));
   }
 
   return {
     winner_lane_id: bestLane.lane_id,
     mode_used: "blend",
     reason: `blend llm_score via formula scoring (${finalRanking.reason})`,
+    scores: rankedLaneScores(records, finalRanking),
     selection_source: "blend_llm_score",
   };
 }
@@ -223,12 +258,14 @@ export async function selectWinner(
   }
 
   if (winnerMode === "formula") {
-    const picked = chooseFormulaLane(experiment, records);
-    if (!picked.laneId) throw new Error("Formula selection found no winner.");
+    const ranking = rankFormulaLanes(experiment, records);
+    const picked = ranking.sorted[0];
+    if (!picked) throw new Error("Formula selection found no winner.");
     return {
-      winner_lane_id: picked.laneId,
+      winner_lane_id: picked.lane_id,
       mode_used: "formula",
-      reason: picked.reason,
+      reason: ranking.reason,
+      scores: rankedLaneScores(records, ranking),
       selection_source: "formula",
     };
   }
@@ -246,6 +283,7 @@ export async function selectWinner(
       winner_lane_id: gradeWinner,
       mode_used: "llm",
       reason: "llm grading winner",
+      scores: llmLaneScores(records, grade.result.scores),
       selection_source: "llm",
     };
   }
@@ -255,10 +293,12 @@ export async function selectWinner(
   if (policy.on_llm_failure === "fallback_formula_then_baseline") {
     const picked = chooseFormulaLane(experiment, records);
     if (picked.laneId) {
+      const ranking = rankFormulaLanes(experiment, records);
       return {
         winner_lane_id: picked.laneId,
         mode_used: "llm-fallback-formula",
         reason: `llm fallback: ${picked.reason}`,
+        scores: rankedLaneScores(records, ranking),
         selection_source: "llm_fallback_formula",
         fallback_reason_code: llmFailureCode,
         llm_error: grade.error,
@@ -275,5 +315,6 @@ export async function selectWinner(
     fallback_reason_code: llmFailureCode,
     llm_error: grade.error,
     llm_error_code: grade.error_code,
+    scores: grade.result ? llmLaneScores(records, grade.result.scores) : undefined,
   };
 }

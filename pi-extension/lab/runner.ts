@@ -430,7 +430,7 @@ function laneMultiCallPrompt(
     `You are lane ${lane.id} in a lab experiment for tool '${targetTool}'.`,
     "You may call tools available in this lane to solve the user task.",
     "Lane APIs may differ from other lanes. Choose the correct API for THIS lane.",
-    "You MUST call at least one lane-specific non-builtin tool before giving the final answer.",
+    `You MUST call the target tool '${targetTool}' at least once before giving the final answer.`,
     "At the end, respond with STRICT JSON only:",
     '{"status":"success|error","final_answer":"...","error":"...optional..."}',
     "",
@@ -476,7 +476,7 @@ function appendLaneModelArg(piArgs: string[], lane: LaneConfig, inheritedModel?:
   piArgs.push("--model", model);
 }
 
-function parseMultiCallLaneSession(sessionFile: string | undefined): {
+function parseMultiCallLaneSession(sessionFile: string | undefined, targetTool: string): {
   outputText?: string;
   isError?: boolean;
   totalTokens?: number;
@@ -521,7 +521,7 @@ function parseMultiCallLaneSession(sessionFile: string | undefined): {
       for (const block of parsed.message.content ?? []) {
         if (block.type === "toolCall") {
           toolCallCount += 1;
-          if (typeof block.name === "string" && !builtins.has(block.name)) {
+          if (typeof block.name === "string" && (block.name === targetTool || !builtins.has(block.name))) {
             customToolCallCount += 1;
           }
         }
@@ -553,7 +553,7 @@ function parseMultiCallLaneSession(sessionFile: string | undefined): {
         : toolCallCount === 0
           ? "Lane protocol violation: expected at least one tool call in lane_multi_call."
           : customToolCallCount === 0
-            ? "Lane protocol violation: expected at least one non-builtin (lane-specific) tool call in lane_multi_call."
+            ? `Lane protocol violation: expected at least one call to the target tool '${targetTool}' in lane_multi_call.`
             : undefined;
 
   return {
@@ -1119,6 +1119,9 @@ export async function runBaselineEditFallbackNoGit(
       process_exit_code: piRes.code,
       output_text: parsed.outputText,
       total_tokens: parsed.totalTokens,
+      tool_call_count: parsed.editCallCount,
+      total_tool_call_count: parsed.editCallCount,
+      target_tool_call_count: parsed.editCallCount,
       patch_path: patch.patchPath,
       patch_bytes: patch.patchBytes,
       session_file: sessionPath,
@@ -1228,6 +1231,9 @@ export async function runBaselineFixedArgsFallbackNoGit(
       process_exit_code: piRes.code,
       output_text: parsed.outputText,
       total_tokens: parsed.totalTokens,
+      tool_call_count: parsed.toolCallCount,
+      total_tool_call_count: parsed.toolCallCount,
+      target_tool_call_count: parsed.toolCallCount,
       patch_path: patch?.patchPath,
       patch_bytes: patch?.patchBytes,
       session_file: sessionPath,
@@ -1280,6 +1286,9 @@ export async function runBaselineSingleCallFallbackNoGit(
       process_exit_code: piRes.code,
       output_text: parsed.outputText,
       total_tokens: parsed.totalTokens,
+      total_tool_call_count: parsed.totalToolCallCount,
+      target_tool_call_count: parsed.targetToolCallCount,
+      tool_call_count: parsed.totalToolCallCount,
       session_file: sessionPath,
       worktree_path: cwd,
       lane_model: effectiveLaneModel,
@@ -1316,7 +1325,7 @@ export async function runBaselineMultiCallFallbackNoGit(
   const start = Date.now();
   const piRes = await runLanePi(piArgs, { worktreePath: cwd, timeoutMs: timeoutMsOf(loaded.experiment), signal });
   const sessionPath = newestSessionFile(sessionDir);
-  const parsed = parseMultiCallLaneSession(sessionPath);
+  const parsed = parseMultiCallLaneSession(sessionPath, targetTool);
   const elapsed = Date.now() - start;
   const laneError = piRes.code !== 0 || parsed.isError === true;
 
@@ -1329,6 +1338,9 @@ export async function runBaselineMultiCallFallbackNoGit(
       process_exit_code: piRes.code,
       output_text: parsed.outputText,
       total_tokens: parsed.totalTokens,
+      tool_call_count: parsed.toolCallCount,
+      total_tool_call_count: parsed.toolCallCount,
+      custom_tool_call_count: parsed.customToolCallCount,
       session_file: sessionPath,
       worktree_path: cwd,
       lane_model: effectiveLaneModel,
@@ -1344,6 +1356,7 @@ export interface LaneProgressItem {
   elapsed_ms?: number;
   error?: string;
   total_tokens?: number;
+  tool_call_count?: number;
   patch_bytes?: number;
   process_exit_code?: number;
   lane_model?: string;
@@ -1428,7 +1441,7 @@ export async function runExperimentLanes(
     }
   }
 
-  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }>();
+  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string; totalTokens?: number; toolCallCount?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }>();
   for (const lane of experiment.lanes) {
     laneProgress.set(lane.id, { status: "pending" });
   }
@@ -1450,6 +1463,7 @@ export async function runExperimentLanes(
           elapsed_ms,
           error: entry.error,
           total_tokens: entry.totalTokens,
+          tool_call_count: entry.toolCallCount,
           patch_bytes: entry.patchBytes,
           process_exit_code: entry.processExitCode,
           lane_model: entry.laneModel,
@@ -1462,7 +1476,7 @@ export async function runExperimentLanes(
   const setLaneProgress = (
     laneId: string,
     status: LaneProgressItem["status"],
-    opts?: { elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" },
+    opts?: { elapsedMs?: number; error?: string; totalTokens?: number; toolCallCount?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" },
   ) => {
     const current = laneProgress.get(laneId) ?? { status: "pending" as const };
     laneProgress.set(laneId, {
@@ -1471,6 +1485,7 @@ export async function runExperimentLanes(
       elapsedMs: opts?.elapsedMs ?? (status === "running" ? current.elapsedMs : current.elapsedMs),
       error: opts?.error,
       totalTokens: opts?.totalTokens ?? current.totalTokens,
+      toolCallCount: opts?.toolCallCount ?? current.toolCallCount,
       patchBytes: opts?.patchBytes ?? current.patchBytes,
       processExitCode: opts?.processExitCode ?? current.processExitCode,
       laneModel: opts?.laneModel ?? current.laneModel,
@@ -1633,6 +1648,9 @@ export async function runExperimentLanes(
           process_exit_code: piRes.code,
           output_text: parsed.outputText,
           total_tokens: parsed.totalTokens,
+          tool_call_count: parsed.editCallCount,
+          total_tool_call_count: parsed.editCallCount,
+          target_tool_call_count: parsed.editCallCount,
           patch_path: patch.patchPath,
           patch_bytes: patch.patchBytes,
           session_file: sessionPath,
@@ -1679,6 +1697,9 @@ export async function runExperimentLanes(
         process_exit_code: piRes.code,
         output_text: parsed.outputText,
         total_tokens: parsed.totalTokens,
+        tool_call_count: parsed.editCallCount,
+        total_tool_call_count: parsed.editCallCount,
+        target_tool_call_count: parsed.editCallCount,
         patch_path: patch.patchPath,
         patch_bytes: patchBytes,
         session_file: sessionPath,
@@ -1721,7 +1742,7 @@ export async function runExperimentLanes(
     const record = await promise;
     const status: LaneProgressItem["status"] =
       record.status === "success" ? "success" : record.status === "timeout" ? "timeout" : "error";
-    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error, totalTokens: record.total_tokens, patchBytes: record.patch_bytes, processExitCode: record.process_exit_code, laneModel: record.lane_model, laneHarness: record.lane_harness_used ?? record.lane_harness_requested });
+    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error, totalTokens: record.total_tokens, toolCallCount: record.tool_call_count ?? record.total_tool_call_count, patchBytes: record.patch_bytes, processExitCode: record.process_exit_code, laneModel: record.lane_model, laneHarness: record.lane_harness_used ?? record.lane_harness_requested });
     return record;
   });
 
@@ -1793,7 +1814,7 @@ export async function runExperimentLanesFixedArgsTool(
     }
   }
 
-  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }>();
+  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string; totalTokens?: number; toolCallCount?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }>();
   for (const lane of experiment.lanes) laneProgress.set(lane.id, { status: "pending" });
 
   const emitProgress = () => {
@@ -1813,6 +1834,7 @@ export async function runExperimentLanesFixedArgsTool(
           elapsed_ms,
           error: entry.error,
           total_tokens: entry.totalTokens,
+          tool_call_count: entry.toolCallCount,
           patch_bytes: entry.patchBytes,
           process_exit_code: entry.processExitCode,
           lane_model: entry.laneModel,
@@ -1825,7 +1847,7 @@ export async function runExperimentLanesFixedArgsTool(
   const setLaneProgress = (
     laneId: string,
     status: LaneProgressItem["status"],
-    opts?: { elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" },
+    opts?: { elapsedMs?: number; error?: string; totalTokens?: number; toolCallCount?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" },
   ) => {
     const current = laneProgress.get(laneId) ?? { status: "pending" as const };
     laneProgress.set(laneId, {
@@ -1834,6 +1856,7 @@ export async function runExperimentLanesFixedArgsTool(
       elapsedMs: opts?.elapsedMs ?? current.elapsedMs,
       error: opts?.error,
       totalTokens: opts?.totalTokens ?? current.totalTokens,
+      toolCallCount: opts?.toolCallCount ?? current.toolCallCount,
       patchBytes: opts?.patchBytes ?? current.patchBytes,
       processExitCode: opts?.processExitCode ?? current.processExitCode,
       laneModel: opts?.laneModel ?? current.laneModel,
@@ -2014,6 +2037,9 @@ export async function runExperimentLanesFixedArgsTool(
           process_exit_code: piRes.code,
           output_text: parsed.outputText,
           total_tokens: parsed.totalTokens,
+          tool_call_count: parsed.toolCallCount,
+          total_tool_call_count: parsed.toolCallCount,
+          target_tool_call_count: parsed.toolCallCount,
           patch_path: patch.patchPath,
           patch_bytes: patch.patchBytes,
           session_file: sessionPath,
@@ -2054,6 +2080,9 @@ export async function runExperimentLanesFixedArgsTool(
         process_exit_code: piRes.code,
         output_text: parsed.outputText,
         total_tokens: parsed.totalTokens,
+        tool_call_count: parsed.toolCallCount,
+        total_tool_call_count: parsed.toolCallCount,
+        target_tool_call_count: parsed.toolCallCount,
         patch_path: patch.patchPath,
         patch_bytes: patch.patchBytes,
         session_file: sessionPath,
@@ -2103,7 +2132,7 @@ export async function runExperimentLanesFixedArgsTool(
     const record = await promise;
     const status: LaneProgressItem["status"] =
       record.status === "success" ? "success" : record.status === "timeout" ? "timeout" : "error";
-    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error, totalTokens: record.total_tokens, patchBytes: record.patch_bytes, processExitCode: record.process_exit_code, laneModel: record.lane_model, laneHarness: record.lane_harness_used ?? record.lane_harness_requested });
+    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error, totalTokens: record.total_tokens, toolCallCount: record.tool_call_count ?? record.total_tool_call_count, patchBytes: record.patch_bytes, processExitCode: record.process_exit_code, laneModel: record.lane_model, laneHarness: record.lane_harness_used ?? record.lane_harness_requested });
     return record;
   });
 
@@ -2177,7 +2206,7 @@ export async function runExperimentLanesSingleCall(
     }
   }
 
-  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }>();
+  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string; totalTokens?: number; toolCallCount?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }>();
   for (const lane of experiment.lanes) laneProgress.set(lane.id, { status: "pending", laneModel: resolveLaneModelOverride(lane, inheritedModel) });
 
   const emitProgress = () => {
@@ -2193,6 +2222,7 @@ export async function runExperimentLanesSingleCall(
           elapsed_ms: entry.status === "running" ? (entry.startedAt ? now - entry.startedAt : entry.elapsedMs) : entry.elapsedMs,
           error: entry.error,
           total_tokens: entry.totalTokens,
+          tool_call_count: entry.toolCallCount,
           patch_bytes: entry.patchBytes,
           process_exit_code: entry.processExitCode,
           lane_model: entry.laneModel,
@@ -2210,6 +2240,7 @@ export async function runExperimentLanesSingleCall(
       elapsedMs: opts?.elapsedMs ?? current.elapsedMs,
       error: opts?.error,
       totalTokens: opts?.totalTokens ?? current.totalTokens,
+      toolCallCount: opts?.toolCallCount ?? current.toolCallCount,
       patchBytes: opts?.patchBytes ?? current.patchBytes,
       processExitCode: opts?.processExitCode ?? current.processExitCode,
       laneModel: opts?.laneModel ?? current.laneModel,
@@ -2330,6 +2361,9 @@ export async function runExperimentLanesSingleCall(
           process_exit_code: piRes.code,
           output_text: parsed.outputText,
           total_tokens: parsed.totalTokens,
+          tool_call_count: parsed.totalToolCallCount,
+          total_tool_call_count: parsed.totalToolCallCount,
+          target_tool_call_count: parsed.targetToolCallCount,
           patch_path: patch.patchPath,
           patch_bytes: patch.patchBytes,
           session_file: sessionPath,
@@ -2356,6 +2390,9 @@ export async function runExperimentLanesSingleCall(
         process_exit_code: piRes.code,
         output_text: parsed.outputText,
         total_tokens: parsed.totalTokens,
+        tool_call_count: parsed.totalToolCallCount,
+        total_tool_call_count: parsed.totalToolCallCount,
+        target_tool_call_count: parsed.targetToolCallCount,
         patch_path: patch.patchPath,
         patch_bytes: patch.patchBytes,
         session_file: sessionPath,
@@ -2403,7 +2440,7 @@ export async function runExperimentLanesSingleCall(
     const record = await promise;
     const status: LaneProgressItem["status"] =
       record.status === "success" ? "success" : record.status === "timeout" ? "timeout" : "error";
-    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error, totalTokens: record.total_tokens, patchBytes: record.patch_bytes, processExitCode: record.process_exit_code, laneModel: record.lane_model, laneHarness: record.lane_harness_used ?? record.lane_harness_requested });
+    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error, totalTokens: record.total_tokens, toolCallCount: record.tool_call_count ?? record.total_tool_call_count, patchBytes: record.patch_bytes, processExitCode: record.process_exit_code, laneModel: record.lane_model, laneHarness: record.lane_harness_used ?? record.lane_harness_requested });
     return record;
   });
 
@@ -2477,7 +2514,7 @@ export async function runExperimentLanesMultiCall(
     }
   }
 
-  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string; totalTokens?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }>();
+  const laneProgress = new Map<string, { status: LaneProgressItem["status"]; startedAt?: number; elapsedMs?: number; error?: string; totalTokens?: number; toolCallCount?: number; patchBytes?: number; processExitCode?: number; laneModel?: string; laneHarness?: "direct" | "pi_prompt" }>();
   for (const lane of experiment.lanes) laneProgress.set(lane.id, { status: "pending", laneModel: resolveLaneModelOverride(lane, inheritedModel) });
 
   const emitProgress = () => {
@@ -2493,6 +2530,7 @@ export async function runExperimentLanesMultiCall(
           elapsed_ms: entry.status === "running" ? (entry.startedAt ? now - entry.startedAt : entry.elapsedMs) : entry.elapsedMs,
           error: entry.error,
           total_tokens: entry.totalTokens,
+          tool_call_count: entry.toolCallCount,
           patch_bytes: entry.patchBytes,
           process_exit_code: entry.processExitCode,
           lane_model: entry.laneModel,
@@ -2510,6 +2548,7 @@ export async function runExperimentLanesMultiCall(
       elapsedMs: opts?.elapsedMs ?? current.elapsedMs,
       error: opts?.error,
       totalTokens: opts?.totalTokens ?? current.totalTokens,
+      toolCallCount: opts?.toolCallCount ?? current.toolCallCount,
       patchBytes: opts?.patchBytes ?? current.patchBytes,
       processExitCode: opts?.processExitCode ?? current.processExitCode,
       laneModel: opts?.laneModel ?? current.laneModel,
@@ -2587,7 +2626,7 @@ export async function runExperimentLanesMultiCall(
       const elapsed = Date.now() - start;
 
       const sessionPath = newestSessionFile(sessionDir);
-      const parsed = parseMultiCallLaneSession(sessionPath);
+      const parsed = parseMultiCallLaneSession(sessionPath, targetTool);
       const patch = await createWorktreePatch(worktreePath, laneDir);
 
       if (!debugEnabledOf(experiment)) {
@@ -2604,6 +2643,9 @@ export async function runExperimentLanesMultiCall(
           process_exit_code: piRes.code,
           output_text: parsed.outputText,
           total_tokens: parsed.totalTokens,
+          tool_call_count: parsed.toolCallCount,
+          total_tool_call_count: parsed.toolCallCount,
+          custom_tool_call_count: parsed.customToolCallCount,
           patch_path: patch.patchPath,
           patch_bytes: patch.patchBytes,
           session_file: sessionPath,
@@ -2630,6 +2672,9 @@ export async function runExperimentLanesMultiCall(
         process_exit_code: piRes.code,
         output_text: parsed.outputText,
         total_tokens: parsed.totalTokens,
+        tool_call_count: parsed.toolCallCount,
+        total_tool_call_count: parsed.toolCallCount,
+        custom_tool_call_count: parsed.customToolCallCount,
         patch_path: patch.patchPath,
         patch_bytes: patch.patchBytes,
         session_file: sessionPath,
@@ -2669,7 +2714,7 @@ export async function runExperimentLanesMultiCall(
     const record = await promise;
     const status: LaneProgressItem["status"] =
       record.status === "success" ? "success" : record.status === "timeout" ? "timeout" : "error";
-    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error, totalTokens: record.total_tokens, patchBytes: record.patch_bytes, processExitCode: record.process_exit_code, laneModel: record.lane_model, laneHarness: record.lane_harness_used ?? record.lane_harness_requested });
+    setLaneProgress(record.lane_id, status, { elapsedMs: record.latency_ms, error: record.error, totalTokens: record.total_tokens, toolCallCount: record.tool_call_count ?? record.total_tool_call_count, patchBytes: record.patch_bytes, processExitCode: record.process_exit_code, laneModel: record.lane_model, laneHarness: record.lane_harness_used ?? record.lane_harness_requested });
     return record;
   });
 

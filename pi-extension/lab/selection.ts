@@ -1,4 +1,4 @@
-import type { LabExperiment, LaneRunRecord } from "./types.ts";
+import type { LabExperiment, LaneRunRecord, LaneScore } from "./types.ts";
 import { formulaConfigOf, getBaselineLaneId } from "./config.ts";
 
 type Direction = "min" | "max";
@@ -51,6 +51,14 @@ function laneMetric(lane: LaneRunRecord, metric: string, extraMetricsByLane?: Ex
       return lane.patch_bytes ?? Number.POSITIVE_INFINITY;
     case "process_exit_code":
       return lane.process_exit_code ?? Number.POSITIVE_INFINITY;
+    case "tool_call_count":
+      return lane.tool_call_count ?? lane.total_tool_call_count ?? Number.POSITIVE_INFINITY;
+    case "total_tool_call_count":
+      return lane.total_tool_call_count ?? lane.tool_call_count ?? Number.POSITIVE_INFINITY;
+    case "target_tool_call_count":
+      return lane.target_tool_call_count ?? Number.POSITIVE_INFINITY;
+    case "custom_tool_call_count":
+      return lane.custom_tool_call_count ?? Number.POSITIVE_INFINITY;
     default:
       return Number.NaN;
   }
@@ -101,6 +109,37 @@ export interface FormulaRanking {
   reason: string;
   compare: (a: LaneRunRecord, b: LaneRunRecord) => number;
   compareWithoutIdFallback: (a: LaneRunRecord, b: LaneRunRecord) => number;
+}
+
+export function normalizedScoresFromRanking(ranking: Pick<FormulaRanking, "sorted" | "reason" | "compareWithoutIdFallback">): LaneScore[] {
+  if (ranking.sorted.length === 0) return [];
+
+  const groups: LaneRunRecord[][] = [];
+  for (const lane of ranking.sorted) {
+    const lastGroup = groups[groups.length - 1];
+    if (!lastGroup || ranking.compareWithoutIdFallback(lastGroup[0]!, lane) !== 0) {
+      groups.push([lane]);
+      continue;
+    }
+    lastGroup.push(lane);
+  }
+
+  if (groups.length <= 1) {
+    return ranking.sorted.map((lane) => ({ lane_id: lane.lane_id, score: 1, reason: ranking.reason }));
+  }
+
+  const scoresByLane = new Map<string, number>();
+  const maxGroupIndex = groups.length - 1;
+  groups.forEach((group, groupIndex) => {
+    const score = 1 - groupIndex / maxGroupIndex;
+    for (const lane of group) scoresByLane.set(lane.lane_id, score);
+  });
+
+  return ranking.sorted.map((lane) => ({
+    lane_id: lane.lane_id,
+    score: scoresByLane.get(lane.lane_id) ?? 0,
+    reason: ranking.reason,
+  }));
 }
 
 export function rankFormulaLanes(

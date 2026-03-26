@@ -69,6 +69,22 @@ const ReplanFlowParams = Type.Object({
   constraints: Type.Optional(Type.String({ description: "Optional constraints/instructions" })),
 });
 
+const InterceptableEditParams = Type.Object({
+  path: Type.Optional(Type.String({ description: "Path to the file to edit (relative or absolute)" })),
+  oldText: Type.Optional(Type.String({ description: "Exact text to find and replace (must match exactly)" })),
+  newText: Type.Optional(Type.String({ description: "New text to replace the old text with" })),
+  task: Type.Optional(Type.String({ description: "Goal for this flow. Lanes may have different concrete APIs and will replan." })),
+  context: Type.Optional(Type.String({ description: "Optional context for the flow" })),
+  constraints: Type.Optional(Type.String({ description: "Optional constraints/instructions" })),
+});
+
+function isExactEditInput(params: any): params is { path: string; oldText: string; newText: string } {
+  return typeof params?.path === "string" && typeof params?.oldText === "string" && typeof params?.newText === "string";
+}
+
+function isReplanFlowInput(params: any): params is { task: string; context?: string; constraints?: string } {
+  return typeof params?.task === "string";
+}
 
 export interface LabExtensionOptions {
   experimentDirs?: string[];
@@ -205,6 +221,7 @@ function formatLaneStatus(experimentId: string, snapshot: LaneProgressSnapshot):
       formatElapsedMs(lane.elapsed_ms),
       lane.lane_model ? `model ${formatModelLabel(lane.lane_model)}` : undefined,
       lane.lane_harness,
+      lane.tool_call_count != null ? `${lane.tool_call_count} calls` : undefined,
       lane.patch_bytes != null ? `patch ${lane.patch_bytes}B` : undefined,
       lane.total_tokens != null ? `${lane.total_tokens} tok` : undefined,
       lane.process_exit_code != null ? `exit ${lane.process_exit_code}` : undefined,
@@ -283,6 +300,7 @@ type ExperimentWinnerSummary = {
   fallback_reason_code?: string;
   llm_error?: string;
   llm_error_code?: string;
+  scores?: Array<{ lane_id: string; score: number; reason?: string }>;
 };
 
 type ExperimentGradingSummary = {
@@ -318,11 +336,11 @@ function buildExperimentSummaryMarkdown(
   const lines = [
     `### pi-lab summary · ${experimentId}`,
     "",
-    "| Lane | Status | Latency ms | Tokens | Patch bytes | Model | Harness | Exit | Error |",
-    "|---|---|---:|---:|---:|---|---|---:|---|",
+    "| Lane | Status | Latency ms | Tool calls | Tokens | Patch bytes | Model | Harness | Exit | Error |",
+    "|---|---|---:|---:|---:|---:|---|---|---:|---|",
     ...lanes.map((lane) => {
       const harness = lane.lane_harness_used ?? lane.lane_harness_requested;
-      return `| ${mdCell(lane.lane_id)} | ${mdCell(lane.status)} | ${mdCell(lane.latency_ms)} | ${mdCell(lane.total_tokens)} | ${mdCell(lane.patch_bytes)} | ${mdCell(lane.lane_model)} | ${mdCell(harness)} | ${mdCell(lane.process_exit_code)} | ${mdCell(lane.error)} |`;
+      return `| ${mdCell(lane.lane_id)} | ${mdCell(lane.status)} | ${mdCell(lane.latency_ms)} | ${mdCell(lane.tool_call_count ?? lane.total_tool_call_count)} | ${mdCell(lane.total_tokens)} | ${mdCell(lane.patch_bytes)} | ${mdCell(lane.lane_model)} | ${mdCell(harness)} | ${mdCell(lane.process_exit_code)} | ${mdCell(lane.error)} |`;
     }),
     "",
     `**Winner:** \`${winner.winner_lane_id}\` via \`${winner.winner_mode}\``,
@@ -331,6 +349,13 @@ function buildExperimentSummaryMarkdown(
   if (winner.reason) lines.push(`**Reason:** ${winner.reason}`);
   if (winner.selection_source) lines.push(`**Selection source:** \`${winner.selection_source}\``);
   if (winner.fallback_reason_code) lines.push(`**Fallback reason:** \`${winner.fallback_reason_code}\``);
+
+  if (winner.scores?.length) {
+    const scoreLine = winner.scores
+      .map((item) => `\`${item.lane_id}: ${item.score.toFixed(3)}\``)
+      .join(" ");
+    lines.push(`**Scores:** ${scoreLine}`);
+  }
 
   const grading = loadGradingSummary(runDir);
   if (grading) {
@@ -358,6 +383,7 @@ type ParsedSummaryRow = {
   lane_id: string;
   status: string;
   latency_ms: string;
+  tool_calls: string;
   tokens: string;
   patch_bytes: string;
   model: string;
@@ -386,7 +412,7 @@ function parseSummaryRows(summaryMarkdown: string): ParsedSummaryRow[] {
   let inLaneTable = false;
 
   for (const line of lines) {
-    if (line.startsWith("| Lane | Status | Latency ms | Tokens | Patch bytes | Model | Harness | Exit | Error |")) {
+    if (line.startsWith("| Lane | Status | Latency ms | Tool calls | Tokens | Patch bytes | Model | Harness | Exit | Error |")) {
       inLaneTable = true;
       continue;
     }
@@ -396,17 +422,18 @@ function parseSummaryRows(summaryMarkdown: string): ParsedSummaryRow[] {
       if (line.trim()) inLaneTable = false;
       continue;
     }
-    if (cells.length !== 9 || cells[0] === "Lane") continue;
+    if (cells.length !== 10 || cells[0] === "Lane") continue;
     rows.push({
       lane_id: cells[0] ?? "—",
       status: cells[1] ?? "—",
       latency_ms: cells[2] ?? "—",
-      tokens: cells[3] ?? "—",
-      patch_bytes: cells[4] ?? "—",
-      model: cells[5] ?? "—",
-      harness: cells[6] ?? "—",
-      exit: cells[7] ?? "—",
-      error: cells[8] ?? "—",
+      tool_calls: cells[3] ?? "—",
+      tokens: cells[4] ?? "—",
+      patch_bytes: cells[5] ?? "—",
+      model: cells[6] ?? "—",
+      harness: cells[7] ?? "—",
+      exit: cells[8] ?? "—",
+      error: cells[9] ?? "—",
     });
   }
 
@@ -438,6 +465,7 @@ function renderLabToolResult(
   const rows = parseSummaryRows(summaryMarkdown);
   const reason = parseSummaryValue(summaryMarkdown, "**Reason:**");
   const selectionSource = parseSummaryValue(summaryMarkdown, "**Selection source:**");
+  const scores = parseSummaryValue(summaryMarkdown, "**Scores:**");
   const llmWinner = parseSummaryValue(summaryMarkdown, "**LLM winner:**");
   const confidence = parseSummaryValue(summaryMarkdown, "**Confidence:**");
   const tieBreak = parseSummaryValue(summaryMarkdown, "**Tie break used:**");
@@ -455,14 +483,19 @@ function renderLabToolResult(
   for (const row of rows) {
     const statusColor = row.status === "success" ? "success" : row.status === "timeout" ? "warning" : row.status === "error" ? "error" : "muted";
     const latency = row.latency_ms !== "—" ? ` · ${row.latency_ms}ms` : "";
+    const toolCalls = row.tool_calls !== "—" ? ` · ${row.tool_calls} calls` : "";
     const patch = row.patch_bytes !== "—" ? ` · patch ${row.patch_bytes}B` : "";
     const model = row.model !== "—" ? ` · model ${row.model}` : "";
     const harness = row.harness !== "—" ? ` · ${row.harness}` : "";
     const exit = row.exit !== "—" ? ` · exit ${row.exit}` : "";
-    text += `\n${theme.fg(statusColor, `${row.status === "success" ? "✓" : row.status === "timeout" ? "⏱" : row.status === "error" ? "✗" : "○"} ${row.lane_id}`)}${theme.fg("dim", `${latency}${patch}${model}${harness}${exit}`)}`;
+    text += `\n${theme.fg(statusColor, `${row.status === "success" ? "✓" : row.status === "timeout" ? "⏱" : row.status === "error" ? "✗" : "○"} ${row.lane_id}`)}${theme.fg("dim", `${latency}${toolCalls}${patch}${model}${harness}${exit}`)}`;
     if (row.error && row.error !== "—") {
       text += `\n${theme.fg("error", `  ${row.error}`)}`;
     }
+  }
+
+  if (scores) {
+    text += `\n${theme.fg("muted", `scores ${scores}`)}`;
   }
 
   if (llmWinner || confidence || tieBreak) {
@@ -789,6 +822,7 @@ async function runFixedArgsToolExperiment(
         winner_lane_id: returnedLane.lane_id,
         winner_mode: returnedWinnerMode,
         reason: winner.reason,
+        scores: winner.scores,
         selection_source: selectionSource,
         fallback_reason_code: fallbackReasonCode,
         llm_error: winner.llm_error,
@@ -968,6 +1002,7 @@ async function runSingleCallFlowExperiment(
         winner_lane_id: selected.lane_id,
         winner_mode: winner.mode_used,
         reason: winner.reason,
+        scores: winner.scores,
         selection_source: winner.selection_source,
         fallback_reason_code: winner.fallback_reason_code,
         llm_error: winner.llm_error,
@@ -1179,6 +1214,7 @@ async function runMultiCallFlowExperiment(
         winner_lane_id: returnedLane.lane_id,
         winner_mode: returnedWinnerMode,
         reason: fallbackApplied ? `${winner.reason}; winner apply failed, baseline patch applied` : winner.reason,
+        scores: winner.scores,
         selection_source: selectionSource,
         fallback_reason_code: fallbackReasonCode,
         llm_error: winner.llm_error,
@@ -1696,6 +1732,275 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
 
       ctx.ui.notify(`Registered proxy lab tool: ${toolName}`, "info");
     }
+
+    const editExperiments = loadExperiments(ctx.cwd, { experimentDirs })
+      .filter((e) => e.experiment.enabled !== false)
+      .filter((e) => (e.validation?.errors?.length ?? 0) === 0)
+      .filter((e) => toolNameOf(e.experiment) === "edit");
+
+    if (editExperiments.length > 0) {
+      const hasProxyEditExperiment = editExperiments.some((e) => {
+        const strategy = canonicalExecutionStrategy(executionStrategyOf(e.experiment));
+        return strategy === "lane_single_call" || strategy === "lane_multi_call";
+      });
+
+      pi.registerTool({
+        name: "edit",
+        label: "edit",
+        description: hasProxyEditExperiment
+          ? "Edit a file by replacing exact text, or start a proxy-flow lab run with task/context/constraints when a matching edit experiment is configured."
+          : "Edit a file by replacing exact text. pi-lab intercepts this call when configured fixed_args edit experiments match trigger policy.",
+        parameters: hasProxyEditExperiment ? InterceptableEditParams : EditParams,
+        renderResult(result, options, theme) {
+          return renderLabToolResult(result, options, theme, (innerResult, innerOptions, innerTheme) => {
+            if (typeof defaultEditToolRenderer.renderResult === "function") {
+              return defaultEditToolRenderer.renderResult(innerResult, innerOptions as any, innerTheme);
+            }
+            return new Text(String(innerResult?.content?.[0]?.type === "text" ? innerResult.content[0].text : "Done."), 0, 0);
+          });
+        },
+
+        async execute(toolCallId, params, signal, onUpdate, execCtx) {
+          const nativeEdit = createEditTool(execCtx.cwd);
+
+          if (process.env.PI_LAB_LANE === "1" || process.env.PI_LAB_GRADER === "1") {
+            if (!isExactEditInput(params)) {
+              throw new Error("In PI_LAB_LANE / PI_LAB_GRADER mode, edit requires path/oldText/newText.");
+            }
+            return nativeEdit.execute(toolCallId, params, signal, onUpdate);
+          }
+
+          if (isReplanFlowInput(params)) {
+            try {
+              return await runSingleCallFlowExperiment(params, "edit", signal, execCtx, cooldownState, experimentDirs);
+            } catch (err: any) {
+              const msg = err?.message ?? String(err);
+              if (!msg.includes("No active lane_single_call experiment matched tool 'edit'")) {
+                throw err;
+              }
+            }
+
+            try {
+              return await runMultiCallFlowExperiment(params, "edit", signal, execCtx, cooldownState, experimentDirs);
+            } catch (err: any) {
+              const msg = err?.message ?? String(err);
+              if (!msg.includes("No active lane_multi_call experiment matched tool 'edit'")) {
+                throw err;
+              }
+            }
+          }
+
+          if (!isExactEditInput(params)) {
+            throw new Error(
+              "edit input is invalid. Provide either path/oldText/newText for exact replacement or task/context/constraints for proxy-flow lab experiments.",
+            );
+          }
+
+          const now = Date.now();
+          const loaded = selectExperimentForEdit(execCtx.cwd, params, now, cooldownState, { experimentDirs });
+          if (!loaded) {
+            return nativeEdit.execute(toolCallId, params, signal, onUpdate);
+          }
+
+          const experiment = loaded.experiment;
+          cooldownState.set(experiment.id, now);
+
+          const run = createRunContext(execCtx.cwd, loaded.source);
+          writeRunManifest(run, experiment, {
+            source: loaded.source,
+            config_path: loaded.path,
+            configured_winner_mode: winnerModeOf(experiment),
+            intercepted_tool: "edit",
+            intercepted_args: { path: params.path, oldText_len: params.oldText.length, newText_len: params.newText.length },
+            execution_strategy: canonicalExecutionStrategy(executionStrategyOf(experiment)),
+            lane_harness: process.env.PI_LAB_LANE_HARNESS ?? inferLaneHarness(executionStrategyOf(experiment)),
+            stage: "started",
+          });
+
+          const policy = defaultPolicy(experiment);
+          const laneStatusKey = "lab-lanes";
+          const gitRepo = await detectGitRepository(execCtx.cwd, signal);
+
+          if (!gitRepo.ok) {
+            const warning = nonGitBaselineFallbackMessage(gitRepo.error);
+            execCtx.ui.notify(warning, "warning");
+
+            const fallback = await runBaselineEditFallbackNoGit(
+              loaded,
+              run,
+              execCtx.cwd,
+              { path: params.path, oldText: params.oldText, newText: params.newText },
+              signal,
+            );
+            const lanes = [fallback.lane];
+            writeLaneRecords(run, lanes);
+            writeRunManifest(run, experiment, {
+              ...summarizeLaneFailures(lanes),
+              stage: fallback.lane.status === "success" ? "completed_fallback_baseline" : "failed",
+              error: gitRepo.error,
+              reason: warning,
+              winner_lane_id: fallback.lane.status === "success" ? fallback.lane.lane_id : undefined,
+              winner_mode: fallback.lane.status === "success" ? "baseline-no-git-fallback" : undefined,
+              selection_source: fallback.lane.status === "success" ? "baseline_no_git_fallback" : undefined,
+              fallback_reason_code: NON_GIT_BASELINE_FALLBACK_REASON,
+            });
+
+            if (fallback.lane.status !== "success") {
+              throw new Error(`Baseline lane failed while running outside a git repo: ${fallback.lane.error ?? "unknown error"}`);
+            }
+
+            const summaryMarkdown = buildExperimentSummaryMarkdown(
+              experiment.id,
+              lanes,
+              {
+                winner_lane_id: fallback.lane.lane_id,
+                winner_mode: "baseline-no-git-fallback",
+                selection_source: "baseline_no_git_fallback",
+                fallback_reason_code: NON_GIT_BASELINE_FALLBACK_REASON,
+              },
+              run.dir,
+            );
+
+            return {
+              content: [{ type: "text", text: combineToolTextWithSummary(fallback.lane.output_text ?? `Successfully replaced text in ${params.path}.`, summaryMarkdown) }],
+              details: {
+                ...(fallback.patchText ? { diff: fallback.patchText, firstChangedLine: undefined } : {}),
+                lab: {
+                  run_id: run.runId,
+                  experiment_id: experiment.id,
+                  winner_lane_id: fallback.lane.lane_id,
+                  winner_mode: "baseline-no-git-fallback",
+                  selection_source: "baseline_no_git_fallback",
+                  fallback_reason_code: NON_GIT_BASELINE_FALLBACK_REASON,
+                  no_git: true,
+                  summary_markdown: summaryMarkdown,
+                },
+              },
+            };
+          }
+
+          try {
+            const lanes = await runExperimentLanes(
+              loaded,
+              run,
+              execCtx.cwd,
+              execCtx.sessionManager.getSessionFile(),
+              { path: params.path, oldText: params.oldText, newText: params.newText },
+              signal,
+              (snapshot) => {
+                updateLaneWidget(execCtx, laneStatusKey, experiment.id, snapshot);
+              },
+            );
+
+            writeLaneRecords(run, lanes);
+            writeRunManifest(run, experiment, {
+              ...summarizeLaneFailures(lanes),
+            });
+
+            const winner = await selectWinner(loaded, run, execCtx.cwd, lanes, { intercepted_tool: "edit", intercepted_args: params as Record<string, unknown> }, execCtx.model, signal);
+            const selected = laneById(lanes, winner.winner_lane_id);
+            if (!selected) {
+              throw new Error(`Winner lane ${winner.winner_lane_id} not found.`);
+            }
+            if (selected.status !== "success") {
+              throw new Error(`Winner lane ${winner.winner_lane_id} is not successful (${selected.status}).`);
+            }
+
+            let returnedLane = selected;
+            let returnedWinnerMode: string = winner.mode_used;
+            let selectionSource = winner.selection_source;
+            let fallbackReasonCode = winner.fallback_reason_code;
+            let appliedPatchText: string | undefined;
+            let fallbackApplied = false;
+
+            const selectedPatchPath = selected.patch_path && (selected.patch_bytes ?? 0) > 0 ? selected.patch_path : undefined;
+            if (selectedPatchPath) {
+              const apply = await applyPatchToMain(execCtx.cwd, selectedPatchPath, signal);
+              if (!apply.ok) {
+                if (policy.on_winner_apply_failure === "fallback_baseline_then_fail") {
+                  const baseline = laneById(lanes, getBaselineLaneId(experiment));
+                  const baselinePatchPath = baseline?.patch_path && (baseline.patch_bytes ?? 0) > 0 ? baseline.patch_path : undefined;
+                  if (baseline && baselinePatchPath && baselinePatchPath !== selectedPatchPath) {
+                    const fallbackApply = await applyPatchToMain(execCtx.cwd, baselinePatchPath, signal);
+                    if (fallbackApply.ok) {
+                      returnedLane = baseline;
+                      returnedWinnerMode = `${winner.mode_used} + baseline-apply-fallback`;
+                      selectionSource = "baseline_apply_fallback";
+                      fallbackReasonCode = "winner_apply_failed_baseline_apply_succeeded";
+                      appliedPatchText = readFileSync(baselinePatchPath, "utf8");
+                      fallbackApplied = true;
+                    }
+                  }
+                }
+
+                if (!appliedPatchText) {
+                  throw new Error(`Winner patch apply failed: ${apply.error ?? "unknown error"}`);
+                }
+              } else {
+                appliedPatchText = readFileSync(selectedPatchPath, "utf8");
+              }
+            }
+
+            writeRunManifest(run, experiment, {
+              stage: "completed",
+              winner_lane_id: returnedLane.lane_id,
+              winner_mode: returnedWinnerMode,
+              reason: fallbackApplied ? `${winner.reason}; winner apply failed, baseline patch applied` : winner.reason,
+              selection_source: selectionSource,
+              fallback_reason_code: fallbackReasonCode,
+              llm_error_code: winner.llm_error_code,
+            });
+
+            const summaryMarkdown = buildExperimentSummaryMarkdown(
+              experiment.id,
+              lanes,
+              {
+                winner_lane_id: returnedLane.lane_id,
+                winner_mode: returnedWinnerMode,
+                reason: winner.reason,
+                scores: winner.scores,
+                selection_source: selectionSource,
+                fallback_reason_code: fallbackReasonCode,
+                llm_error: winner.llm_error,
+                llm_error_code: winner.llm_error_code,
+              },
+              run.dir,
+            );
+
+            return {
+              content: [{ type: "text", text: combineToolTextWithSummary(returnedLane.output_text ?? `Successfully replaced text in ${params.path}.`, summaryMarkdown) }],
+              details: {
+                ...(appliedPatchText ? { diff: appliedPatchText, firstChangedLine: undefined } : {}),
+                lab: {
+                  run_id: run.runId,
+                  experiment_id: experiment.id,
+                  winner_lane_id: returnedLane.lane_id,
+                  winner_mode: returnedWinnerMode,
+                  selection_source: selectionSource,
+                  fallback_reason_code: fallbackReasonCode,
+                  llm_error: winner.llm_error,
+                  llm_error_code: winner.llm_error_code,
+                  summary_markdown: summaryMarkdown,
+                },
+              },
+            };
+          } catch (err: any) {
+            const errorText = err?.message ?? String(err);
+            writeRunManifest(run, experiment, {
+              stage: "failed",
+              error: errorText,
+              fallback_reason_code: "ab_failed_no_fallback",
+            });
+            throw err;
+          } finally {
+            updateLaneWidget(execCtx, laneStatusKey, experiment.id, undefined);
+            pruneEmptyRunScaffolding(run);
+          }
+        },
+      });
+
+      ctx.ui.notify(`Registered edit lab interceptor (${hasProxyEditExperiment ? "proxy-capable" : "fixed-args-only"}).`, "info");
+    }
   });
 
   pi.registerCommand("lab", {
@@ -1821,305 +2126,6 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
       }
 
       ctx.ui.notify("Usage: /lab create | experiments | runs | maintenance", "warning");
-    },
-  });
-
-  pi.registerTool({
-    name: "edit",
-    label: "edit",
-    description:
-      "Edit a file by replacing exact text. pi-lab intercepts this call when configured experiments match trigger policy.",
-    parameters: EditParams,
-    renderResult(result, options, theme) {
-      return renderLabToolResult(result, options, theme, (innerResult, innerOptions, innerTheme) => {
-        if (typeof defaultEditToolRenderer.renderResult === "function") {
-          return defaultEditToolRenderer.renderResult(innerResult, innerOptions as any, innerTheme);
-        }
-        return new Text(String(innerResult?.content?.[0]?.type === "text" ? innerResult.content[0].text : "Done."), 0, 0);
-      });
-    },
-
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const nativeEdit = createEditTool(ctx.cwd);
-
-      if (process.env.PI_LAB_LANE === "1" || process.env.PI_LAB_GRADER === "1") {
-        return nativeEdit.execute(toolCallId, params, signal, onUpdate);
-      }
-
-      const now = Date.now();
-      const loaded = selectExperimentForEdit(ctx.cwd, params, now, cooldownState, { experimentDirs });
-      if (!loaded) {
-        return nativeEdit.execute(toolCallId, params, signal, onUpdate);
-      }
-
-      const experiment = loaded.experiment;
-      cooldownState.set(experiment.id, now);
-
-      const run = createRunContext(ctx.cwd, loaded.source);
-      writeRunManifest(run, experiment, {
-        source: loaded.source,
-        config_path: loaded.path,
-        configured_winner_mode: winnerModeOf(experiment),
-        intercepted_tool: "edit",
-        intercepted_args: { path: params.path, oldText_len: params.oldText.length, newText_len: params.newText.length },
-        execution_strategy: canonicalExecutionStrategy(executionStrategyOf(experiment)),
-        lane_harness: process.env.PI_LAB_LANE_HARNESS ?? inferLaneHarness(executionStrategyOf(experiment)),
-        stage: "started",
-      });
-
-      const policy = defaultPolicy(experiment);
-      const laneStatusKey = "lab-lanes";
-      const gitRepo = await detectGitRepository(ctx.cwd, signal);
-
-      if (!gitRepo.ok) {
-        const warning = nonGitBaselineFallbackMessage(gitRepo.error);
-        ctx.ui.notify(warning, "warning");
-
-        const fallback = await runBaselineEditFallbackNoGit(
-          loaded,
-          run,
-          ctx.cwd,
-          { path: params.path, oldText: params.oldText, newText: params.newText },
-          signal,
-        );
-        const lanes = [fallback.lane];
-        writeLaneRecords(run, lanes);
-        writeRunManifest(run, experiment, {
-          ...summarizeLaneFailures(lanes),
-          stage: fallback.lane.status === "success" ? "completed_fallback_baseline" : "failed",
-          error: gitRepo.error,
-          reason: warning,
-          winner_lane_id: fallback.lane.status === "success" ? fallback.lane.lane_id : undefined,
-          winner_mode: fallback.lane.status === "success" ? "baseline-no-git-fallback" : undefined,
-          selection_source: fallback.lane.status === "success" ? "baseline_no_git_fallback" : undefined,
-          fallback_reason_code: NON_GIT_BASELINE_FALLBACK_REASON,
-        });
-
-        if (fallback.lane.status !== "success") {
-          throw new Error(`Baseline lane failed while running outside a git repo: ${fallback.lane.error ?? "unknown error"}`);
-        }
-
-        const summaryMarkdown = buildExperimentSummaryMarkdown(
-          experiment.id,
-          lanes,
-          {
-            winner_lane_id: fallback.lane.lane_id,
-            winner_mode: "baseline-no-git-fallback",
-            selection_source: "baseline_no_git_fallback",
-            fallback_reason_code: NON_GIT_BASELINE_FALLBACK_REASON,
-          },
-          run.dir,
-        );
-
-        return {
-          content: [{ type: "text", text: combineToolTextWithSummary(fallback.lane.output_text ?? `Successfully replaced text in ${params.path}.`, summaryMarkdown) }],
-          details: {
-            ...(fallback.patchText ? { diff: fallback.patchText, firstChangedLine: undefined } : {}),
-            lab: {
-              run_id: run.runId,
-              experiment_id: experiment.id,
-              winner_lane_id: fallback.lane.lane_id,
-              winner_mode: "baseline-no-git-fallback",
-              selection_source: "baseline_no_git_fallback",
-              fallback_reason_code: NON_GIT_BASELINE_FALLBACK_REASON,
-              no_git: true,
-              summary_markdown: summaryMarkdown,
-            },
-          },
-        };
-      }
-
-      try {
-        const lanes = await runExperimentLanes(
-          loaded,
-          run,
-          ctx.cwd,
-          ctx.sessionManager.getSessionFile(),
-          { path: params.path, oldText: params.oldText, newText: params.newText },
-          signal,
-          (snapshot) => {
-            updateLaneWidget(ctx, laneStatusKey, experiment.id, snapshot);
-          },
-        );
-
-        writeLaneRecords(run, lanes);
-        writeRunManifest(run, experiment, {
-          ...summarizeLaneFailures(lanes),
-        });
-
-        const winner = await selectWinner(
-          loaded,
-          run,
-          ctx.cwd,
-          lanes,
-          {
-            intercepted_tool: "edit",
-            intercepted_args: {
-              path: params.path,
-              oldText_len: params.oldText.length,
-              newText_len: params.newText.length,
-            },
-          },
-          ctx.model,
-          signal,
-        );
-
-        const selected = laneById(lanes, winner.winner_lane_id);
-        if (!selected || !selected.patch_path || (selected.patch_bytes ?? 0) <= 0) {
-          throw new Error(`Winner lane ${winner.winner_lane_id} has no patch.`);
-        }
-
-        const apply = await applyPatchToMain(ctx.cwd, selected.patch_path, signal);
-        if (!apply.ok) {
-          if (policy.on_winner_apply_failure === "fallback_baseline_then_fail") {
-            const baseline = laneById(lanes, getBaselineLaneId(experiment));
-            if (baseline?.patch_path && baseline.patch_path !== selected.patch_path) {
-              const fallbackApply = await applyPatchToMain(ctx.cwd, baseline.patch_path, signal);
-              if (fallbackApply.ok) {
-                const patch = readFileSync(baseline.patch_path, "utf8");
-                writeRunManifest(run, experiment, {
-                  stage: "completed",
-                  winner_lane_id: baseline.lane_id,
-                  winner_mode: `${winner.mode_used} + baseline-apply-fallback`,
-                  reason: `${winner.reason}; winner apply failed, baseline patch applied`,
-                  selection_source: "baseline_apply_fallback",
-                  fallback_reason_code: "winner_apply_failed_baseline_apply_succeeded",
-                  llm_error_code: winner.llm_error_code,
-                });
-
-                const summaryMarkdown = buildExperimentSummaryMarkdown(
-                  experiment.id,
-                  lanes,
-                  {
-                    winner_lane_id: baseline.lane_id,
-                    winner_mode: `${winner.mode_used} + baseline-apply-fallback`,
-                    reason: `${winner.reason}; winner apply failed, baseline patch applied`,
-                    selection_source: "baseline_apply_fallback",
-                    fallback_reason_code: "winner_apply_failed_baseline_apply_succeeded",
-                    llm_error: winner.llm_error,
-                    llm_error_code: winner.llm_error_code,
-                  },
-                  run.dir,
-                );
-
-                return {
-                  content: [{ type: "text", text: combineToolTextWithSummary(baseline.output_text ?? `Successfully replaced text in ${params.path}.`, summaryMarkdown) }],
-                  details: {
-                    diff: patch,
-                    firstChangedLine: undefined,
-                    lab: {
-                      run_id: run.runId,
-                      experiment_id: experiment.id,
-                      winner_lane_id: baseline.lane_id,
-                      winner_mode: winner.mode_used,
-                      selection_source: "baseline_apply_fallback",
-                      fallback_applied: true,
-                      fallback_reason_code: "winner_apply_failed_baseline_apply_succeeded",
-                      llm_error_code: winner.llm_error_code,
-                      summary_markdown: summaryMarkdown,
-                    },
-                  },
-                };
-              }
-            }
-          }
-
-          throw new Error(`Winner patch apply failed: ${apply.error ?? "unknown error"}`);
-        }
-
-        const patch = readFileSync(selected.patch_path, "utf8");
-        writeRunManifest(run, experiment, {
-          stage: "completed",
-          winner_lane_id: selected.lane_id,
-          winner_mode: winner.mode_used,
-          reason: winner.reason,
-          selection_source: winner.selection_source,
-          fallback_reason_code: winner.fallback_reason_code,
-          llm_error_code: winner.llm_error_code,
-        });
-
-        const summaryMarkdown = buildExperimentSummaryMarkdown(
-          experiment.id,
-          lanes,
-          {
-            winner_lane_id: selected.lane_id,
-            winner_mode: winner.mode_used,
-            reason: winner.reason,
-            selection_source: winner.selection_source,
-            fallback_reason_code: winner.fallback_reason_code,
-            llm_error: winner.llm_error,
-            llm_error_code: winner.llm_error_code,
-          },
-          run.dir,
-        );
-
-        return {
-          content: [{ type: "text", text: combineToolTextWithSummary(selected.output_text ?? `Successfully replaced text in ${params.path}.`, summaryMarkdown) }],
-          details: {
-            diff: patch,
-            firstChangedLine: undefined,
-            lab: {
-              run_id: run.runId,
-              experiment_id: experiment.id,
-              winner_lane_id: selected.lane_id,
-              winner_mode: winner.mode_used,
-              selection_source: winner.selection_source,
-              fallback_reason_code: winner.fallback_reason_code,
-              llm_error: winner.llm_error,
-              llm_error_code: winner.llm_error_code,
-              summary_markdown: summaryMarkdown,
-            },
-          },
-        };
-      } catch (err: any) {
-        const errorText = err?.message ?? String(err);
-
-        if (policy.all_lanes_failed === "fallback_baseline") {
-          try {
-            const nativeFallback = await nativeEdit.execute(toolCallId, params, signal, onUpdate);
-            writeRunManifest(run, experiment, {
-              stage: "completed_fallback_native",
-              error: errorText,
-              reason: "lane orchestration failed; native edit fallback",
-              selection_source: "native_fallback",
-              fallback_reason_code: "lane_orchestration_failed_native_fallback",
-            });
-            return {
-              content: nativeFallback.content,
-              details: {
-                ...(nativeFallback as any).details,
-                lab: {
-                  run_id: run.runId,
-                  experiment_id: experiment.id,
-                  configured_winner_mode: winnerModeOf(experiment),
-                  selection_source: "native_fallback",
-                  fallback_native: true,
-                  fallback_reason_code: "lane_orchestration_failed_native_fallback",
-                  error: errorText,
-                },
-              },
-            };
-          } catch (nativeErr: any) {
-            const nativeErrorText = nativeErr?.message ?? String(nativeErr);
-            writeRunManifest(run, experiment, {
-              stage: "failed",
-              error: `${errorText}; native fallback failed: ${nativeErrorText}`,
-              fallback_reason_code: "native_fallback_failed",
-            });
-            throw nativeErr;
-          }
-        }
-
-        writeRunManifest(run, experiment, {
-          stage: "failed",
-          error: errorText,
-          fallback_reason_code: "ab_failed_no_fallback",
-        });
-        throw err;
-      } finally {
-        updateLaneWidget(ctx, laneStatusKey, experiment.id, undefined);
-        pruneEmptyRunScaffolding(run);
-      }
     },
   });
 }
