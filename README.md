@@ -53,7 +53,8 @@ pi -e ./pi-extension/lab/index.ts
 The easiest path is:
 1. install `pi-lab`
 2. open your project in pi
-3. ask your clanker to set up the experiment for you
+3. run `/lab create`
+4. let pi-lab collect the setup details and inject them into the conversation
 
 What the clanker should usually do:
 - inspect the target tool or workflow before choosing `fixed_args`, `lane_single_call`, or `lane_multi_call`
@@ -80,6 +81,7 @@ That means:
 `/lab` is the built-in control surface for pi-lab.
 
 - `/lab` opens the interactive menu
+- `/lab create` opens the guided experiment setup flow
 - the menu has **Experiments**, **Runs**, and **Maintenance**
 - text commands like `/lab experiments`, `/lab runs`, `/lab status`, `/lab validate`, and `/lab gc ...` also work
 

@@ -22,6 +22,7 @@
 Useful commands:
 
 ```text
+/lab create
 /lab status
 /lab validate
 /lab runs

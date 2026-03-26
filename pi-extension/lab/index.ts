@@ -1453,6 +1453,335 @@ async function showMaintenanceMenu(ctx: any) {
   }
 }
 
+type LabComparisonShape = "same_args" | "single_call" | "multi_call" | "unsure";
+type LabScopeChoice = "project" | "global";
+type LabWinnerPreference = "recommend" | "formula" | "llm" | "blend" | "hardcoded";
+
+type LabCreateAnswers = {
+  compareTargets: string;
+  goal: string;
+  successCriteria: string;
+  comparisonShape: LabComparisonShape;
+  scope: LabScopeChoice;
+  candidateLanes?: string;
+  assetLocations?: string;
+  winnerPreference: LabWinnerPreference;
+  enableImmediately: boolean;
+  triggerNotes?: string;
+  inspectToolInterface: boolean;
+};
+
+type LabToolInspection = {
+  name: string;
+  required: string[];
+  optional: string[];
+};
+
+function parseRequestedTargets(raw: string): string[] {
+  return raw
+    .split(/[\n,]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function summarizeToolSchema(tool: any): { required: string[]; optional: string[] } {
+  const schema = tool?.parameters as any;
+  const properties = schema && typeof schema === "object" && schema.properties && typeof schema.properties === "object"
+    ? schema.properties
+    : {};
+  const required = Array.isArray(schema?.required)
+    ? schema.required.filter((value: unknown) => typeof value === "string")
+    : [];
+  const keys = Object.keys(properties);
+  const optional = keys.filter((key) => !required.includes(key));
+  return { required, optional };
+}
+
+function inspectRequestedTools(pi: ExtensionAPI, rawTargets: string): LabToolInspection[] {
+  const requested = parseRequestedTargets(rawTargets);
+  const tools = pi.getAllTools();
+  const inspections: LabToolInspection[] = [];
+
+  for (const target of requested) {
+    const normalized = target.replace(/^\//, "");
+    const match = tools.find((tool) => tool.name === normalized);
+    if (!match) continue;
+    const schema = summarizeToolSchema(match);
+    inspections.push({
+      name: match.name,
+      required: schema.required,
+      optional: schema.optional,
+    });
+  }
+
+  return inspections;
+}
+
+function recommendStrategy(
+  answers: LabCreateAnswers,
+  inspections: LabToolInspection[],
+): { strategy: "fixed_args" | "lane_single_call" | "lane_multi_call"; reason: string } {
+  if (answers.comparisonShape === "same_args") {
+    return {
+      strategy: "fixed_args",
+      reason: "You said the compared lanes should handle the same exact call across lanes.",
+    };
+  }
+
+  if (answers.comparisonShape === "single_call") {
+    return {
+      strategy: "lane_single_call",
+      reason: "You said this is still one intentional tool call, but lanes may shape it differently.",
+    };
+  }
+
+  if (answers.comparisonShape === "multi_call") {
+    return {
+      strategy: "lane_multi_call",
+      reason: "You said the comparison is a broader multi-step flow.",
+    };
+  }
+
+  if (inspections.length === 1) {
+    const inspected = inspections[0];
+    const described = inspected.required.length > 0 ? `required params: ${inspected.required.join(", ")}` : "a concrete tool schema";
+    return {
+      strategy: "fixed_args",
+      reason: `Matched registered tool '${inspected.name}' with ${described}. Start with fixed_args if every lane accepts the same call shape.`,
+    };
+  }
+
+  if (/plan|replan|multi-step|workflow|chain|agent/i.test(`${answers.goal} ${answers.compareTargets}`)) {
+    return {
+      strategy: "lane_multi_call",
+      reason: "Your goal sounds like a multi-step workflow, so lane_multi_call is the safest default.",
+    };
+  }
+
+  return {
+    strategy: "lane_single_call",
+    reason: "Could not confidently prove a same-args comparison from tool inspection alone, so lane_single_call is the safer recommendation.",
+  };
+}
+
+function recommendWinnerMode(
+  answers: LabCreateAnswers,
+): { mode: "formula" | "llm" | "blend" | "hardcoded"; reason: string } {
+  if (answers.winnerPreference !== "recommend") {
+    return {
+      mode: answers.winnerPreference,
+      reason: "You chose the winner mode explicitly.",
+    };
+  }
+
+  const text = answers.successCriteria.toLowerCase();
+  const hasMetricSignals = /latency|speed|fast|tokens|cost|throughput|timeout|runtime|ms|seconds|cheap/.test(text);
+  const hasSemanticSignals = /quality|semantic|correct|correctness|style|better output|safer|safety|readability|reasoning/.test(text);
+  const hasRolloutSignals = /always|force|rollout|baseline only|keep baseline|safe rollout/.test(text);
+
+  if (hasRolloutSignals) {
+    return {
+      mode: "hardcoded",
+      reason: "Your success criteria sound like a safe rollout where one lane should always win.",
+    };
+  }
+
+  if (hasMetricSignals && hasSemanticSignals) {
+    return {
+      mode: "blend",
+      reason: "Your success criteria mix objective metrics and semantic quality, so blend is the best fit.",
+    };
+  }
+
+  if (hasSemanticSignals) {
+    return {
+      mode: "llm",
+      reason: "Your success criteria emphasize semantic quality over pure metrics.",
+    };
+  }
+
+  return {
+    mode: "formula",
+    reason: "Defaulting to formula because measurable signals are usually the best first step.",
+  };
+}
+
+function formatToolInspection(inspections: LabToolInspection[], rawTargets: string): string[] {
+  if (inspections.length === 0) {
+    return [
+      `- No exact registered tool match found for: ${rawTargets}`,
+      "- The agent should inspect the referenced tools/extensions directly before writing config.",
+    ];
+  }
+
+  return inspections.map((inspection) => {
+    const required = inspection.required.length > 0 ? inspection.required.join(", ") : "none";
+    const optional = inspection.optional.length > 0 ? inspection.optional.join(", ") : "none";
+    return `- ${inspection.name} — required: ${required}; optional: ${optional}`;
+  });
+}
+
+function buildLabCreatePrompt(
+  answers: LabCreateAnswers,
+  inspections: LabToolInspection[],
+  strategy: { strategy: "fixed_args" | "lane_single_call" | "lane_multi_call"; reason: string },
+  winner: { mode: "formula" | "llm" | "blend" | "hardcoded"; reason: string },
+): string {
+  const scopePath = answers.scope === "project" ? ".pi/lab/experiments/*.json" : "~/.pi/agent/lab/experiments/*.json";
+  const lines = [
+    "Please help me set up a pi-lab experiment for this project.",
+    "",
+    "## pi-lab experiment setup brief",
+    `- What to compare: ${answers.compareTargets}`,
+    `- What I want to test: ${answers.goal}`,
+    `- Success criteria: ${answers.successCriteria}`,
+    `- Scope: ${answers.scope} (${scopePath})`,
+    `- Candidate lanes: ${answers.candidateLanes?.trim() || "not specified yet"}`,
+    `- Assets / paths: ${answers.assetLocations?.trim() || "not specified yet"}`,
+    `- Winner preference: ${answers.winnerPreference === "recommend" ? "recommend automatically" : answers.winnerPreference}`,
+    `- Enable immediately: ${answers.enableImmediately ? "yes" : "no"}`,
+    `- Trigger notes: ${answers.triggerNotes?.trim() || "none specified"}`,
+    "",
+    "## Registered tool inspection",
+    ...formatToolInspection(inspections, answers.compareTargets),
+    "",
+    "## Recommended setup",
+    `- execution.strategy: ${strategy.strategy}`,
+    `- Why: ${strategy.reason}`,
+    `- winner.mode: ${winner.mode}`,
+    `- Why: ${winner.reason}`,
+    "",
+    "## Next action",
+    "- Inspect the referenced tool(s), extension(s), and files before writing config.",
+    "- Ask follow-up questions only if something material is still missing or ambiguous.",
+    `- Create the experiment in ${scopePath}.`,
+    "- Create or wire the baseline lane and any requested variants.",
+    `- ${answers.enableImmediately ? "Leave the experiment enabled when created." : "Create it disabled initially."}`,
+    "- Explain what you created, why you chose that strategy, and how to run or inspect it.",
+  ];
+
+  return lines.join("\n");
+}
+
+async function runCreateExperimentWizard(pi: ExtensionAPI, ctx: any, initialTargets?: string) {
+  if (!ctx.hasUI) {
+    ctx.ui.notify("/lab create needs interactive UI prompts.", "warning");
+    return;
+  }
+
+  const compareTargets = initialTargets?.trim()
+    || (await ctx.ui.input(
+      "What tools or extensions do you want to compare?",
+      "e.g. edit, edit_compare, ./lanes/edit/*.ts",
+    ))?.trim()
+    || "";
+  if (!compareTargets) return;
+
+  const goal = (await ctx.ui.input(
+    "What behavior or outcome do you want to improve or test?",
+    "e.g. faster edit results with equal quality",
+  ))?.trim();
+  if (!goal) return;
+
+  const successCriteria = (await ctx.ui.input(
+    "What should count as success?",
+    "e.g. lower latency, fewer tokens, better semantic quality",
+  ))?.trim();
+  if (!successCriteria) return;
+
+  const shapeChoice = await ctx.ui.select("How should the compared lanes behave?", [
+    "Same exact call across lanes",
+    "One intentional tool call, but lanes may shape it differently",
+    "Broader multi-step flow",
+    "Not sure — inspect and recommend",
+  ]);
+  if (!shapeChoice) return;
+
+  const scopeChoice = await ctx.ui.select("Where should the experiment live?", [
+    "Project-local (.pi/lab/experiments)",
+    "Global (~/.pi/agent/lab/experiments)",
+  ]);
+  if (!scopeChoice) return;
+
+  const candidateLanes = (await ctx.ui.input(
+    "Do you already have candidate lanes? (optional)",
+    "e.g. baseline + variant-a, or leave blank",
+  ))?.trim();
+
+  const assetLocations = (await ctx.ui.input(
+    "Where are the lane files, prompts, or experiment assets? (optional)",
+    "paths or notes",
+  ))?.trim();
+
+  const winnerChoice = await ctx.ui.select("How should the winner mode be chosen?", [
+    "Recommend automatically",
+    "Formula",
+    "LLM",
+    "Blend",
+    "Hardcoded rollout",
+  ]);
+  if (!winnerChoice) return;
+
+  const enableImmediately = await ctx.ui.confirm(
+    "Enable immediately?",
+    "Should the experiment start enabled once it is created?",
+  );
+
+  const triggerNotes = (await ctx.ui.input(
+    "Any trigger constraints? (optional)",
+    "sample rate, path regex, cooldown, oldText min chars, etc.",
+  ))?.trim();
+
+  const inspectToolInterface = await ctx.ui.confirm(
+    "Inspect registered tool interfaces first?",
+    "This helps recommend fixed_args vs lane_single_call vs lane_multi_call.",
+  );
+
+  const answers: LabCreateAnswers = {
+    compareTargets,
+    goal,
+    successCriteria,
+    comparisonShape:
+      shapeChoice === "Same exact call across lanes"
+        ? "same_args"
+        : shapeChoice === "One intentional tool call, but lanes may shape it differently"
+          ? "single_call"
+          : shapeChoice === "Broader multi-step flow"
+            ? "multi_call"
+            : "unsure",
+    scope: scopeChoice.startsWith("Project-local") ? "project" : "global",
+    candidateLanes,
+    assetLocations,
+    winnerPreference:
+      winnerChoice === "Formula"
+        ? "formula"
+        : winnerChoice === "LLM"
+          ? "llm"
+          : winnerChoice === "Blend"
+            ? "blend"
+            : winnerChoice === "Hardcoded rollout"
+              ? "hardcoded"
+              : "recommend",
+    enableImmediately,
+    triggerNotes,
+    inspectToolInterface,
+  };
+
+  const inspections = inspectToolInterface ? inspectRequestedTools(pi, compareTargets) : [];
+  const strategy = recommendStrategy(answers, inspections);
+  const winner = recommendWinnerMode(answers);
+  const prompt = buildLabCreatePrompt(answers, inspections, strategy, winner);
+
+  if (ctx.isIdle()) {
+    pi.sendUserMessage(prompt);
+    ctx.ui.notify("Injected the lab setup brief into the conversation.", "info");
+    return;
+  }
+
+  pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+  ctx.ui.notify("Queued the lab setup brief as a follow-up.", "info");
+}
+
 async function showLabsMenu(ctx: any, experimentDirs?: string[]) {
   while (true) {
     const choice = await ctx.ui.select("pi-lab", [
@@ -1589,7 +1918,12 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
           await showLabsMenu(ctx, experimentDirs);
           return;
         }
-        ctx.ui.notify("Usage: /lab (interactive) or /lab experiments | runs | maintenance", "warning");
+        ctx.ui.notify("Usage: /lab (interactive) or /lab create | experiments | runs | maintenance", "warning");
+        return;
+      }
+
+      if (cmd === "create" || cmd.startsWith("create ")) {
+        await runCreateExperimentWizard(pi, ctx, cmd.slice("create".length).trim() || undefined);
         return;
       }
 
@@ -1696,7 +2030,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
         return;
       }
 
-      ctx.ui.notify("Usage: /lab experiments | runs | maintenance", "warning");
+      ctx.ui.notify("Usage: /lab create | experiments | runs | maintenance", "warning");
     },
   });
 
