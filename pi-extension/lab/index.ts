@@ -12,6 +12,7 @@ import {
   createReadTool,
   createWriteTool,
   getSettingsListTheme,
+  keyHint,
 } from "@mariozechner/pi-coding-agent";
 import {
   Container,
@@ -27,8 +28,10 @@ import { Type } from "@sinclair/typebox";
 import { getBaselineLaneId } from "./selection.ts";
 import {
   canonicalExecutionStrategy,
+  deactivateBuiltinToolsOf,
   executionStrategyOf,
   formatExperimentSummary,
+  formulaConfigOf,
   getGlobalLabDir,
   getProjectLabDir,
   loadExperiments,
@@ -311,6 +314,20 @@ type ExperimentGradingSummary = {
   notes?: string;
 };
 
+const FORMULA_PLACEHOLDER_KEYS = [
+  "success",
+  "timeout",
+  "error",
+  "latency_ms",
+  "total_tokens",
+  "tool_call_count",
+  "total_tool_call_count",
+  "target_tool_call_count",
+  "custom_tool_call_count",
+  "patch_bytes",
+  "process_exit_code",
+] as const;
+
 function mdCell(value: unknown): string {
   if (value == null) return "—";
   const text = String(value).trim();
@@ -327,14 +344,68 @@ function loadGradingSummary(runDir: string): ExperimentGradingSummary | undefine
   }
 }
 
+function formulaPlaceholderValue(lane: LaneRunRecord, key: typeof FORMULA_PLACEHOLDER_KEYS[number]): number | undefined {
+  switch (key) {
+    case "success":
+      return lane.status === "success" ? 1 : 0;
+    case "timeout":
+      return lane.status === "timeout" ? 1 : 0;
+    case "error":
+      return lane.status === "error" ? 1 : 0;
+    case "latency_ms":
+      return lane.latency_ms;
+    case "total_tokens":
+      return lane.total_tokens;
+    case "tool_call_count":
+      return lane.tool_call_count ?? lane.total_tool_call_count;
+    case "total_tool_call_count":
+      return lane.total_tool_call_count ?? lane.tool_call_count;
+    case "target_tool_call_count":
+      return lane.target_tool_call_count;
+    case "custom_tool_call_count":
+      return lane.custom_tool_call_count;
+    case "patch_bytes":
+      return lane.patch_bytes;
+    case "process_exit_code":
+      return lane.process_exit_code;
+  }
+}
+
+function evaluateFormulaTemplate(template: string | undefined, lane: LaneRunRecord): number | undefined {
+  const trimmed = template?.trim();
+  if (!trimmed) return undefined;
+  const match = trimmed.match(/^(min|max)\((.*)\)$/i);
+  const body = match?.[2]?.trim() || trimmed;
+  if (!body) return undefined;
+
+  const substituted = body.replace(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g, (_full, key: string) => {
+    if (!FORMULA_PLACEHOLDER_KEYS.includes(key as typeof FORMULA_PLACEHOLDER_KEYS[number])) return "(0/0)";
+    const value = formulaPlaceholderValue(lane, key as typeof FORMULA_PLACEHOLDER_KEYS[number]);
+    return typeof value === "number" && Number.isFinite(value) ? String(value) : "(0/0)";
+  });
+
+  if (substituted.includes("**") || !/^[0-9+\-*/().\s]+$/.test(substituted)) return undefined;
+
+  try {
+    const value = Function(`"use strict"; return (${substituted});`)();
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function buildExperimentSummaryMarkdown(
-  experimentId: string,
+  experiment: { id: string; winner?: { formula?: { objective?: string; tie_breakers?: string[] } } },
   lanes: LaneRunRecord[],
   winner: ExperimentWinnerSummary,
   runDir: string,
 ): string {
+  const formula = formulaConfigOf(experiment as any);
+  const objectiveTemplate = formula.objective ?? "min(latency_ms)";
+  const tieBreakerTemplates = formula.tie_breakers ?? [];
+
   const lines = [
-    `### pi-lab summary · ${experimentId}`,
+    `### pi-lab summary · ${experiment.id}`,
     "",
     "| Lane | Status | Latency ms | Tool calls | Tokens | Patch bytes | Model | Harness | Exit | Error |",
     "|---|---|---:|---:|---:|---:|---|---|---:|---|",
@@ -356,6 +427,29 @@ function buildExperimentSummaryMarkdown(
       .join(" ");
     lines.push(`**Scores:** ${scoreLine}`);
   }
+
+  const objectiveValues = lanes
+    .map((lane) => {
+      const value = evaluateFormulaTemplate(objectiveTemplate, lane);
+      return `\`${lane.lane_id}: ${typeof value === "number" ? value.toFixed(3) : "—"}\``;
+    })
+    .join(" ");
+
+  lines.push(
+    "",
+    "#### Formula placeholders",
+    "",
+    `**Objective template:** \`${objectiveTemplate}\``,
+    tieBreakerTemplates.length > 0 ? `**Tie-breakers:** ${tieBreakerTemplates.map((item) => `\`${item}\``).join(" → ")}` : "",
+    `**Objective values:** ${objectiveValues}`,
+    "",
+    "| Lane | Status | success | timeout | error | latency_ms | total_tokens | tool_call_count | total_tool_call_count | target_tool_call_count | custom_tool_call_count | patch_bytes | process_exit_code | objective_value |",
+    "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ...lanes.map((lane) => {
+      const objectiveValue = evaluateFormulaTemplate(objectiveTemplate, lane);
+      return `| ${mdCell(lane.lane_id)} | ${mdCell(lane.status)} | ${mdCell(formulaPlaceholderValue(lane, "success"))} | ${mdCell(formulaPlaceholderValue(lane, "timeout"))} | ${mdCell(formulaPlaceholderValue(lane, "error"))} | ${mdCell(formulaPlaceholderValue(lane, "latency_ms"))} | ${mdCell(formulaPlaceholderValue(lane, "total_tokens"))} | ${mdCell(formulaPlaceholderValue(lane, "tool_call_count"))} | ${mdCell(formulaPlaceholderValue(lane, "total_tool_call_count"))} | ${mdCell(formulaPlaceholderValue(lane, "target_tool_call_count"))} | ${mdCell(formulaPlaceholderValue(lane, "custom_tool_call_count"))} | ${mdCell(formulaPlaceholderValue(lane, "patch_bytes"))} | ${mdCell(formulaPlaceholderValue(lane, "process_exit_code"))} | ${mdCell(typeof objectiveValue === "number" ? objectiveValue.toFixed(3) : undefined)} |`;
+    }),
+  );
 
   const grading = loadGradingSummary(runDir);
   if (grading) {
@@ -390,6 +484,11 @@ type ParsedSummaryRow = {
   harness: string;
   exit: string;
   error: string;
+};
+
+type ParsedMarkdownTable = {
+  headers: string[];
+  rows: string[][];
 };
 
 function stripSimpleMarkdown(text: string): string {
@@ -446,6 +545,51 @@ function parseSummaryValue(summaryMarkdown: string, label: string): string | und
   return stripSimpleMarkdown(line.slice(label.length).trim());
 }
 
+function parseMarkdownTable(summaryMarkdown: string, headerLinePrefix: string): ParsedMarkdownTable | undefined {
+  const lines = summaryMarkdown.split("\n");
+  const headerIndex = lines.findIndex((line) => line.startsWith(headerLinePrefix));
+  if (headerIndex < 0) return undefined;
+
+  const headers = parseMarkdownTableCells(lines[headerIndex] ?? "");
+  if (!headers || headers.length === 0) return undefined;
+
+  const rows: string[][] = [];
+  for (let i = headerIndex + 1; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (/^\|[-:| ]+\|$/.test(trimmed)) continue;
+
+    const cells = parseMarkdownTableCells(line);
+    if (!cells) break;
+    if (cells.length === headers.length && cells[0] !== headers[0]) {
+      rows.push(cells);
+      continue;
+    }
+    break;
+  }
+
+  return { headers, rows };
+}
+
+function renderTableAsLines(table: ParsedMarkdownTable): string {
+  return table.rows
+    .map((row) => {
+      const label = row[0] ?? "item";
+      const parts = table.headers
+        .slice(1)
+        .map((header, index) => ({ header, value: row[index + 1] ?? "—" }))
+        .filter((entry) => entry.value && entry.value !== "—")
+        .map((entry) => `${entry.header.toLowerCase()}: ${entry.value}`);
+      return parts.length > 0 ? `${label} — ${parts.join(" · ")}` : label;
+    })
+    .join("\n");
+}
+
+function renderSectionTitle(theme: any, title: string): string {
+  return theme.fg("accent", title);
+}
+
 function renderLabToolResult(
   result: any,
   options: { expanded?: boolean; isPartial?: boolean },
@@ -458,20 +602,32 @@ function renderLabToolResult(
 
   const lab = result?.details?.lab as { summary_markdown?: string; experiment_id?: string; winner_lane_id?: string; winner_mode?: string } | undefined;
   const summaryMarkdown = lab?.summary_markdown;
+  const baseText = String(result?.content?.[0]?.type === "text" ? result.content[0].text : "Done.").trim();
   if (!summaryMarkdown) {
-    return fallback ? fallback(result, options, theme) : new Text(String(result?.content?.[0]?.type === "text" ? result.content[0].text : "Done."), 0, 0);
+    return fallback ? fallback(result, options, theme) : new Text(baseText, 0, 0);
   }
 
   const rows = parseSummaryRows(summaryMarkdown);
   const reason = parseSummaryValue(summaryMarkdown, "**Reason:**");
   const selectionSource = parseSummaryValue(summaryMarkdown, "**Selection source:**");
   const scores = parseSummaryValue(summaryMarkdown, "**Scores:**");
+  const objectiveTemplate = parseSummaryValue(summaryMarkdown, "**Objective template:**");
+  const objectiveValues = parseSummaryValue(summaryMarkdown, "**Objective values:**");
+  const tieBreakers = parseSummaryValue(summaryMarkdown, "**Tie-breakers:**");
   const llmWinner = parseSummaryValue(summaryMarkdown, "**LLM winner:**");
   const confidence = parseSummaryValue(summaryMarkdown, "**Confidence:**");
   const tieBreak = parseSummaryValue(summaryMarkdown, "**Tie break used:**");
   const notes = parseSummaryValue(summaryMarkdown, "**Notes:**");
+  const laneTable = parseMarkdownTable(summaryMarkdown, "| Lane | Status | Latency ms | Tool calls | Tokens | Patch bytes | Model | Harness | Exit | Error |");
+  const formulaTable = parseMarkdownTable(summaryMarkdown, "| Lane | Status | success | timeout | error | latency_ms | total_tokens | tool_call_count | total_tool_call_count");
+  const llmTable = parseMarkdownTable(summaryMarkdown, "| Lane | Score | Reason |");
 
-  let text = `\n${theme.fg("accent", `pi-lab summary · ${lab?.experiment_id ?? "experiment"}`)}`;
+  let text = "";
+  const hasBaseText = baseText && baseText !== "Done.";
+  if (hasBaseText) {
+    text += `\n${baseText}`;
+  }
+  text += `${hasBaseText ? "\n\n" : "\n"}${theme.fg("accent", `pi-lab summary · ${lab?.experiment_id ?? "experiment"}`)}`;
   text += `\n${theme.fg("success", `winner ${lab?.winner_lane_id ?? "—"}`)}${theme.fg("dim", ` via ${lab?.winner_mode ?? "—"}`)}`;
   if (selectionSource && selectionSource !== lab?.winner_mode) {
     text += `\n${theme.fg("dim", `selection source: ${selectionSource}`)}`;
@@ -497,17 +653,47 @@ function renderLabToolResult(
   if (scores) {
     text += `\n${theme.fg("muted", `scores ${scores}`)}`;
   }
+  if (objectiveValues) {
+    text += `\n${theme.fg("muted", `objective ${objectiveValues}`)}`;
+  }
 
   if (llmWinner || confidence || tieBreak) {
     const parts = [llmWinner ? `llm ${llmWinner}` : undefined, confidence ? `confidence ${confidence}` : undefined, tieBreak ? `tie ${tieBreak}` : undefined].filter(Boolean);
     if (parts.length > 0) text += `\n${theme.fg("muted", parts.join(" · "))}`;
   }
 
+  if (!options.expanded) {
+    text += `\n${theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`)}`;
+  }
+
   if (options.expanded) {
-    if (notes) {
-      text += `\n\n${theme.fg("muted", `notes: ${notes}`)}`;
+    if (laneTable?.rows.length) {
+      text += `\n\n${renderSectionTitle(theme, "lane details")}`;
+      text += `\n${renderTableAsLines(laneTable)}`;
     }
-    text += `\n\n${summaryMarkdown}`;
+
+    if (objectiveTemplate || tieBreakers || objectiveValues || formulaTable?.rows.length) {
+      text += `\n\n${renderSectionTitle(theme, "formula placeholders")}`;
+      if (objectiveTemplate) text += `\n${theme.fg("muted", `objective template: ${objectiveTemplate}`)}`;
+      if (tieBreakers) text += `\n${theme.fg("muted", `tie-breakers: ${tieBreakers}`)}`;
+      if (objectiveValues) text += `\n${theme.fg("muted", `objective values: ${objectiveValues}`)}`;
+      if (formulaTable?.rows.length) {
+        text += `\n${renderTableAsLines(formulaTable)}`;
+      }
+    }
+
+    if (llmWinner || confidence || tieBreak || llmTable?.rows.length || notes) {
+      text += `\n\n${renderSectionTitle(theme, "llm grading")}`;
+      if (llmWinner) text += `\n${theme.fg("muted", `winner: ${llmWinner}`)}`;
+      if (confidence) text += `\n${theme.fg("muted", `confidence: ${confidence}`)}`;
+      if (tieBreak) text += `\n${theme.fg("muted", `tie break used: ${tieBreak}`)}`;
+      if (llmTable?.rows.length) {
+        text += `\n${renderTableAsLines(llmTable)}`;
+      }
+      if (notes) {
+        text += `\n${theme.fg("muted", `notes: ${notes}`)}`;
+      }
+    }
   }
 
   return new Text(text, 0, 0);
@@ -630,6 +816,34 @@ function inferLaneHarness(executionStrategy: unknown): "direct" | "pi_prompt" {
   return canonicalExecutionStrategy(executionStrategy) === "fixed_args" ? "direct" : "pi_prompt";
 }
 
+function proxyToolDescription(toolName: string, configuredDescription?: string): string {
+  return configuredDescription?.trim() ||
+    `Lab proxy-flow starter for '${toolName}'. Call this with task/context/constraints; lanes run either lane_single_call (single tool call) or lane_multi_call (multi-step replanning).`;
+}
+
+function proxyToolPromptSnippet(toolName: string, configuredDescription?: string): string {
+  return configuredDescription?.trim() || `Use ${toolName} for this project's proxy-flow experiment tasks`;
+}
+
+function proxyToolPromptGuidelines(toolName: string, configuredDescription?: string): string[] {
+  const guidelines: string[] = [];
+  const trimmedDescription = configuredDescription?.trim();
+  if (trimmedDescription) guidelines.push(trimmedDescription);
+
+  if (toolName.toLowerCase().includes("edit")) {
+    guidelines.push(
+      `When you want to edit files in this experiment, use '${toolName}' directly. Do not fall back to the built-in 'edit' tool, 'write', or bash rewrites unless the user explicitly asks.`,
+    );
+  } else {
+    guidelines.push(
+      `When this project expects '${toolName}', call the '${toolName}' tool directly instead of trying to emulate it with other tools.`,
+    );
+  }
+
+  guidelines.push(`'${toolName}' accepts a task plus optional context/constraints and will route the request through pi-lab experiment lanes.`);
+  return guidelines;
+}
+
 async function runFixedArgsToolExperiment(
   params: Record<string, unknown>,
   toolName: string,
@@ -694,7 +908,7 @@ async function runFixedArgsToolExperiment(
     const warning = nonGitBaselineFallbackMessage(gitRepo.error);
     ctx.ui.notify(warning, "warning");
 
-    const fallback = await runBaselineFixedArgsFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal);
+    const fallback = await runBaselineFixedArgsFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model, pi.getThinkingLevel());
     const lanes = [fallback.lane];
     writeLaneRecords(run, lanes);
     writeRunManifest(run, experiment, {
@@ -713,7 +927,7 @@ async function runFixedArgsToolExperiment(
     }
 
     const summaryMarkdown = buildExperimentSummaryMarkdown(
-      experiment.id,
+      experiment,
       lanes,
       {
         winner_lane_id: fallback.lane.lane_id,
@@ -753,6 +967,8 @@ async function runFixedArgsToolExperiment(
       (snapshot) => {
         updateLaneWidget(ctx, laneStatusKey, experiment.id, snapshot);
       },
+      ctx.model,
+      pi.getThinkingLevel(),
     );
 
     const lanes = laneRun.records;
@@ -816,7 +1032,7 @@ async function runFixedArgsToolExperiment(
     });
 
     const summaryMarkdown = buildExperimentSummaryMarkdown(
-      experiment.id,
+      experiment,
       lanes,
       {
         winner_lane_id: returnedLane.lane_id,
@@ -908,7 +1124,7 @@ async function runSingleCallFlowExperiment(
     const warning = nonGitBaselineFallbackMessage(gitRepo.error);
     ctx.ui.notify(warning, "warning");
 
-    const fallback = await runBaselineSingleCallFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model);
+    const fallback = await runBaselineSingleCallFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model, pi.getThinkingLevel());
     const lanes = [fallback.lane];
     writeLaneRecords(run, lanes);
     writeRunManifest(run, experiment, {
@@ -927,7 +1143,7 @@ async function runSingleCallFlowExperiment(
     }
 
     const summaryMarkdown = buildExperimentSummaryMarkdown(
-      experiment.id,
+      experiment,
       lanes,
       {
         winner_lane_id: fallback.lane.lane_id,
@@ -967,6 +1183,7 @@ async function runSingleCallFlowExperiment(
         updateLaneWidget(ctx, laneStatusKey, experiment.id, snapshot);
       },
       ctx.model,
+      pi.getThinkingLevel(),
     );
 
     const lanes = laneRun.records;
@@ -996,7 +1213,7 @@ async function runSingleCallFlowExperiment(
     });
 
     const summaryMarkdown = buildExperimentSummaryMarkdown(
-      experiment.id,
+      experiment,
       lanes,
       {
         winner_lane_id: selected.lane_id,
@@ -1087,7 +1304,7 @@ async function runMultiCallFlowExperiment(
     const warning = nonGitBaselineFallbackMessage(gitRepo.error);
     ctx.ui.notify(warning, "warning");
 
-    const fallback = await runBaselineMultiCallFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model);
+    const fallback = await runBaselineMultiCallFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model, pi.getThinkingLevel());
     const lanes = [fallback.lane];
     writeLaneRecords(run, lanes);
     writeRunManifest(run, experiment, {
@@ -1106,7 +1323,7 @@ async function runMultiCallFlowExperiment(
     }
 
     const summaryMarkdown = buildExperimentSummaryMarkdown(
-      experiment.id,
+      experiment,
       lanes,
       {
         winner_lane_id: fallback.lane.lane_id,
@@ -1146,6 +1363,7 @@ async function runMultiCallFlowExperiment(
         updateLaneWidget(ctx, laneStatusKey, experiment.id, snapshot);
       },
       ctx.model,
+      pi.getThinkingLevel(),
     );
 
     writeLaneRecords(run, lanes);
@@ -1208,7 +1426,7 @@ async function runMultiCallFlowExperiment(
     });
 
     const summaryMarkdown = buildExperimentSummaryMarkdown(
-      experiment.id,
+      experiment,
       lanes,
       {
         winner_lane_id: returnedLane.lane_id,
@@ -1568,6 +1786,11 @@ function buildLabCreateKickoff(pi: ExtensionAPI, ctx: any, initialTargets?: stri
     "- ask whether this should be project-local or global if that is still unclear",
     "- ask about lane files, prompts, experiment assets, and whether candidate lanes already exist",
     "- inspect the real tool/input shape before recommending fixed_args vs lane_single_call vs lane_multi_call",
+    "- inspect whether the target is a builtin tool and make this a required decision point: ask whether the user wants a transparent same-name replacement or an explicit lab-only proxy tool name",
+    "- for builtin targets, default to additive mode unless the user explicitly asks for transparent replacement under the builtin name",
+    "- if the user wants normal requests to naturally use the replacement, keep the replacement under the builtin name (for example `edit`) instead of inventing a differently named proxy (for example `edit_experiment`)",
+    "- if builtin replacement discoverability matters, create or recommend a companion custom extension that blocks or redirects builtin behavior as needed, says the builtin tool is not directly available, points the agent to the replacement under the same name, and adds any needed guardrails",
+    "- use deactivate_builtin_tools when the builtin should disappear from the main session's active tool list, but note that this alone does not add prompt guidance or fallback blocking",
     "- recommend winner mode only after understanding whether this is about metrics, semantic quality, or both",
     "- create the experiment once the missing information is resolved",
     "- explain what you created and how to run or inspect it afterward",
@@ -1575,6 +1798,8 @@ function buildLabCreateKickoff(pi: ExtensionAPI, ctx: any, initialTargets?: stri
     "Defaults to prefer unless I say otherwise:",
     "- prefer project-local experiments in .pi/lab/experiments/*.json",
     "- keep one clear baseline/fallback lane",
+    "- for builtin targets, default to additive mode rather than replacing the builtin tool name unless I explicitly ask for transparent replacement",
+    "- when builtin replacement is explicitly requested because the replacement should feel like normal usage, prefer the builtin name itself",
     "- do not ask unnecessary config-level questions up front",
   ];
 
@@ -1638,11 +1863,16 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
   const defaultEditToolRenderer = createEditTool(process.cwd());
 
   pi.on("session_start", (_event, ctx) => {
-    const seenFixedArgsTools = new Set<string>();
-    const allExperiments = loadExperiments(ctx.cwd, { experimentDirs })
+    const isLaneOrGrader = process.env.PI_LAB_LANE === "1" || process.env.PI_LAB_GRADER === "1";
+    const activeExperiments = loadExperiments(ctx.cwd, { experimentDirs })
       .filter((e) => e.experiment.enabled !== false)
-      .filter((e) => (e.validation?.errors?.length ?? 0) === 0)
-      .filter((e) => toolNameOf(e.experiment) !== "edit");
+      .filter((e) => (e.validation?.errors?.length ?? 0) === 0);
+    const builtinToolsToDeactivate = isLaneOrGrader
+      ? []
+      : Array.from(new Set(activeExperiments.flatMap((e) => deactivateBuiltinToolsOf(e.experiment))));
+    const registeredLabToolNames = new Set<string>();
+    const seenFixedArgsTools = new Set<string>();
+    const allExperiments = activeExperiments.filter((e) => toolNameOf(e.experiment) !== "edit");
 
     const fixedArgsExperiments = allExperiments.filter(
       (e) => canonicalExecutionStrategy(executionStrategyOf(e.experiment)) === "fixed_args",
@@ -1693,6 +1923,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
         },
       });
 
+      registeredLabToolNames.add(toolName);
       ctx.ui.notify(`Registered fixed_args lab interceptor: ${toolName}`, "info");
     }
 
@@ -1710,8 +1941,9 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
       pi.registerTool({
         name: toolName,
         label: toolName,
-        description:
-          `Lab proxy-flow starter for '${toolName}'. Call this with task/context/constraints; lanes run either lane_single_call (single tool call) or lane_multi_call (multi-step replanning).`,
+        description: proxyToolDescription(toolName, loaded.experiment.tool?.description),
+        promptSnippet: proxyToolPromptSnippet(toolName, loaded.experiment.tool?.description),
+        promptGuidelines: proxyToolPromptGuidelines(toolName, loaded.experiment.tool?.description),
         parameters: ReplanFlowParams,
         async execute(_toolCallId, params, signal, _onUpdate, execCtx) {
           try {
@@ -1730,10 +1962,11 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
         },
       });
 
+      registeredLabToolNames.add(toolName);
       ctx.ui.notify(`Registered proxy lab tool: ${toolName}`, "info");
     }
 
-    const editExperiments = loadExperiments(ctx.cwd, { experimentDirs })
+    const editExperiments = activeExperiments
       .filter((e) => e.experiment.enabled !== false)
       .filter((e) => (e.validation?.errors?.length ?? 0) === 0)
       .filter((e) => toolNameOf(e.experiment) === "edit");
@@ -1748,8 +1981,14 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
         name: "edit",
         label: "edit",
         description: hasProxyEditExperiment
-          ? "Edit a file by replacing exact text, or start a proxy-flow lab run with task/context/constraints when a matching edit experiment is configured."
+          ? proxyToolDescription("edit", editExperiments[0]?.experiment.tool?.description)
           : "Edit a file by replacing exact text. pi-lab intercepts this call when configured fixed_args edit experiments match trigger policy.",
+        promptSnippet: hasProxyEditExperiment
+          ? proxyToolPromptSnippet("edit", editExperiments[0]?.experiment.tool?.description)
+          : undefined,
+        promptGuidelines: hasProxyEditExperiment
+          ? proxyToolPromptGuidelines("edit", editExperiments[0]?.experiment.tool?.description)
+          : undefined,
         parameters: hasProxyEditExperiment ? InterceptableEditParams : EditParams,
         renderResult(result, options, theme) {
           return renderLabToolResult(result, options, theme, (innerResult, innerOptions, innerTheme) => {
@@ -1850,7 +2089,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
             }
 
             const summaryMarkdown = buildExperimentSummaryMarkdown(
-              experiment.id,
+              experiment,
               lanes,
               {
                 winner_lane_id: fallback.lane.lane_id,
@@ -1952,7 +2191,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
             });
 
             const summaryMarkdown = buildExperimentSummaryMarkdown(
-              experiment.id,
+              experiment,
               lanes,
               {
                 winner_lane_id: returnedLane.lane_id,
@@ -1999,7 +2238,30 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
         },
       });
 
+      registeredLabToolNames.add("edit");
       ctx.ui.notify(`Registered edit lab interceptor (${hasProxyEditExperiment ? "proxy-capable" : "fixed-args-only"}).`, "info");
+    }
+
+    if (builtinToolsToDeactivate.length > 0) {
+      const activeToolNames = pi.getActiveTools();
+      const nextActiveToolNames = Array.from(
+        new Set([
+          ...activeToolNames.filter((toolName) => !builtinToolsToDeactivate.includes(toolName)),
+          ...builtinToolsToDeactivate.filter((toolName) => registeredLabToolNames.has(toolName)),
+        ]),
+      );
+      const changed =
+        nextActiveToolNames.length !== activeToolNames.length ||
+        nextActiveToolNames.some((toolName, index) => toolName !== activeToolNames[index]);
+
+      if (changed) {
+        pi.setActiveTools(nextActiveToolNames);
+      }
+
+      ctx.ui.notify(
+        `Applied deactivate_builtin_tools from pi-lab config: ${builtinToolsToDeactivate.join(", ")}`,
+        "info",
+      );
     }
   });
 

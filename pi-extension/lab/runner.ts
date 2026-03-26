@@ -2,7 +2,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statS
 import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createEditTool } from "@mariozechner/pi-coding-agent";
-import type { LoadedExperiment, LaneConfig, LaneHarnessFallbackReason, LaneRunRecord } from "./types.ts";
+import type { LoadedExperiment, LaneConfig, LaneHarnessFallbackReason, LaneRunRecord, LaneThinkingLevel } from "./types.ts";
 import { canonicalExecutionStrategy, debugEnabledOf, debugUiOf, executionStrategyOf, resolveConfiguredPath, timeoutMsOf } from "./config.ts";
 import type { RunContext } from "./storage.ts";
 import { extractFirstJsonObject, modelToCli, runCommand, safeJsonParse } from "./utils.ts";
@@ -432,7 +432,8 @@ function laneMultiCallPrompt(
     "Lane APIs may differ from other lanes. Choose the correct API for THIS lane.",
     `You MUST call the target tool '${targetTool}' at least once before giving the final answer.`,
     "At the end, respond with STRICT JSON only:",
-    '{"status":"success|error","final_answer":"...","error":"...optional..."}',
+    '{"status":"success|error","final_answer":"...required...","full_answer":"...optional...","steps":["...optional..."],"error":"...optional..."}',
+    "Use final_answer for the concise result/value. If the caller asked for steps or explanation, put the exact user-facing response in full_answer, or provide steps[] and final_answer.",
     "",
     `USER_TASK: ${args.task}`,
     args.context ? `CONTEXT: ${args.context}` : "",
@@ -470,10 +471,54 @@ export function resolveLaneModelOverride(
   return modelToCli(inheritedModel);
 }
 
+export function resolveLaneThinkingOverride(
+  lane: LaneConfig,
+  inheritedThinking?: LaneThinkingLevel,
+): LaneThinkingLevel | undefined {
+  if (lane.thinking) return lane.thinking;
+  return inheritedThinking;
+}
+
 function appendLaneModelArg(piArgs: string[], lane: LaneConfig, inheritedModel?: string | { provider?: string; id?: string }): void {
   const model = resolveLaneModelOverride(lane, inheritedModel);
   if (!model) return;
   piArgs.push("--model", model);
+}
+
+function appendLaneThinkingArg(piArgs: string[], lane: LaneConfig, inheritedThinking?: LaneThinkingLevel): void {
+  const thinking = resolveLaneThinkingOverride(lane, inheritedThinking);
+  if (!thinking) return;
+  piArgs.push("--thinking", thinking);
+}
+
+function renderMultiCallLaneAnswer(
+  parsedJson: { final_answer?: string; full_answer?: unknown; steps?: unknown } | null | undefined,
+  assistantText: string,
+): string | undefined {
+  const finalAnswer = typeof parsedJson?.final_answer === "string" ? parsedJson.final_answer.trim() : "";
+  const fullAnswer = typeof parsedJson?.full_answer === "string" ? parsedJson.full_answer.trim() : "";
+  const steps = Array.isArray(parsedJson?.steps)
+    ? parsedJson.steps
+      .filter((step): step is string => typeof step === "string")
+      .map((step) => step.trim())
+      .filter(Boolean)
+    : typeof parsedJson?.steps === "string"
+      ? parsedJson.steps
+        .split("\n")
+        .map((step) => step.trim())
+        .filter(Boolean)
+      : [];
+
+  const combinedSteps = steps.length > 0
+    ? [
+      ...steps.map((step, index) => (/^step\s+\d+:/i.test(step) ? step : `Step ${index + 1}: ${step}`)),
+      finalAnswer ? `Final answer: ${finalAnswer}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n")
+    : "";
+
+  return fullAnswer || combinedSteps || finalAnswer || assistantText || undefined;
 }
 
 function parseMultiCallLaneSession(sessionFile: string | undefined, targetTool: string): {
@@ -536,8 +581,8 @@ function parseMultiCallLaneSession(sessionFile: string | undefined, targetTool: 
     .trim();
 
   const parsedJson =
-    safeJsonParse<{ status?: string; final_answer?: string; error?: string }>(assistantText) ??
-    (extractFirstJsonObject(assistantText) as { status?: string; final_answer?: string; error?: string } | null);
+    safeJsonParse<{ status?: string; final_answer?: string; full_answer?: unknown; steps?: unknown; error?: string }>(assistantText) ??
+    (extractFirstJsonObject(assistantText) as { status?: string; final_answer?: string; full_answer?: unknown; steps?: unknown; error?: string } | null);
 
   const statusRaw = parsedJson?.status?.toLowerCase();
   const statusHint = statusRaw === "success" || statusRaw === "error" ? (statusRaw as "success" | "error") : undefined;
@@ -557,7 +602,7 @@ function parseMultiCallLaneSession(sessionFile: string | undefined, targetTool: 
             : undefined;
 
   return {
-    outputText: finalAnswer || assistantText || undefined,
+    outputText: renderMultiCallLaneAnswer(parsedJson, assistantText),
     isError:
       statusHint === "error" ||
       strictJsonViolation ||
@@ -1141,8 +1186,12 @@ export async function runBaselineFixedArgsFallbackNoGit(
   targetTool: string,
   toolArgs: Record<string, unknown>,
   signal?: AbortSignal,
+  inheritedModel?: string | { provider?: string; id?: string },
+  inheritedThinking?: LaneThinkingLevel,
 ): Promise<BaselineLaneFallbackResult> {
   const lane = getBaselineLane(loaded.experiment);
+  const effectiveLaneModel = resolveLaneModelOverride(lane, inheritedModel);
+  const effectiveLaneThinking = resolveLaneThinkingOverride(lane, inheritedThinking);
   const laneDir = join(run.dir, "lanes", lane.id);
   const sessionDir = join(run.dir, "sessions", lane.id);
   mkdirSync(laneDir, { recursive: true });
@@ -1198,6 +1247,8 @@ export async function runBaselineFixedArgsFallbackNoGit(
 
   if (laneHarnessUsed === "pi_prompt") {
     const piArgs: string[] = ["-p", "--session-dir", sessionDir, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"];
+    appendLaneModelArg(piArgs, lane, inheritedModel);
+    appendLaneThinkingArg(piArgs, lane, inheritedThinking);
     for (const ext of lane.extensions) piArgs.push("-e", resolveConfiguredPath(ext, cwd, loaded.path));
     piArgs.push(`@${promptPath}`);
     piRes = await runLanePi(piArgs, { worktreePath: cwd, timeoutMs: timeoutMsOf(loaded.experiment), signal });
@@ -1238,6 +1289,8 @@ export async function runBaselineFixedArgsFallbackNoGit(
       patch_bytes: patch?.patchBytes,
       session_file: sessionPath,
       worktree_path: cwd,
+      lane_model: effectiveLaneModel,
+      lane_thinking: effectiveLaneThinking,
       lane_harness_requested: laneHarnessRequested,
       lane_harness_used: laneHarnessUsed,
       lane_harness_fallback_reason: laneHarnessFallbackReason,
@@ -1254,9 +1307,11 @@ export async function runBaselineSingleCallFallbackNoGit(
   flowArgs: { task: string; context?: string; constraints?: string },
   signal?: AbortSignal,
   inheritedModel?: string,
+  inheritedThinking?: LaneThinkingLevel,
 ): Promise<BaselineLaneFallbackResult> {
   const lane = getBaselineLane(loaded.experiment);
   const effectiveLaneModel = resolveLaneModelOverride(lane, inheritedModel);
+  const effectiveLaneThinking = resolveLaneThinkingOverride(lane, inheritedThinking);
   const laneDir = join(run.dir, "lanes", lane.id);
   const sessionDir = join(run.dir, "sessions", lane.id);
   mkdirSync(laneDir, { recursive: true });
@@ -1267,6 +1322,7 @@ export async function runBaselineSingleCallFallbackNoGit(
 
   const piArgs: string[] = ["-p", "--session-dir", sessionDir, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"];
   appendLaneModelArg(piArgs, lane, inheritedModel);
+  appendLaneThinkingArg(piArgs, lane, inheritedThinking);
   for (const ext of lane.extensions) piArgs.push("-e", resolveConfiguredPath(ext, cwd, loaded.path));
   piArgs.push(`@${promptPath}`);
 
@@ -1292,6 +1348,7 @@ export async function runBaselineSingleCallFallbackNoGit(
       session_file: sessionPath,
       worktree_path: cwd,
       lane_model: effectiveLaneModel,
+      lane_thinking: effectiveLaneThinking,
       lane_harness_requested: "pi_prompt",
       lane_harness_used: "pi_prompt",
     },
@@ -1306,9 +1363,11 @@ export async function runBaselineMultiCallFallbackNoGit(
   flowArgs: { task: string; context?: string; constraints?: string },
   signal?: AbortSignal,
   inheritedModel?: string,
+  inheritedThinking?: LaneThinkingLevel,
 ): Promise<BaselineLaneFallbackResult> {
   const lane = getBaselineLane(loaded.experiment);
   const effectiveLaneModel = resolveLaneModelOverride(lane, inheritedModel);
+  const effectiveLaneThinking = resolveLaneThinkingOverride(lane, inheritedThinking);
   const laneDir = join(run.dir, "lanes", lane.id);
   const sessionDir = join(run.dir, "sessions", lane.id);
   mkdirSync(laneDir, { recursive: true });
@@ -1319,6 +1378,7 @@ export async function runBaselineMultiCallFallbackNoGit(
 
   const piArgs: string[] = ["-p", "--session-dir", sessionDir, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"];
   appendLaneModelArg(piArgs, lane, inheritedModel);
+  appendLaneThinkingArg(piArgs, lane, inheritedThinking);
   for (const ext of lane.extensions) piArgs.push("-e", resolveConfiguredPath(ext, cwd, loaded.path));
   piArgs.push(`@${promptPath}`);
 
@@ -1344,6 +1404,7 @@ export async function runBaselineMultiCallFallbackNoGit(
       session_file: sessionPath,
       worktree_path: cwd,
       lane_model: effectiveLaneModel,
+      lane_thinking: effectiveLaneThinking,
       lane_harness_requested: "pi_prompt",
       lane_harness_used: "pi_prompt",
     },
@@ -1360,6 +1421,7 @@ export interface LaneProgressItem {
   patch_bytes?: number;
   process_exit_code?: number;
   lane_model?: string;
+  lane_thinking?: LaneThinkingLevel;
   lane_harness?: "direct" | "pi_prompt";
 }
 
@@ -1719,6 +1781,8 @@ export async function runExperimentLanes(
         status: "error",
         error: err?.message ?? String(err),
         patch_path: existsSync(patchPath) ? patchPath : undefined,
+        lane_model: effectiveLaneModel,
+        lane_thinking: effectiveLaneThinking,
         lane_harness_requested: laneHarnessRequested,
         lane_harness_used: laneHarnessUsed,
         lane_harness_fallback_reason: laneHarnessFallbackReason,
@@ -1773,6 +1837,8 @@ export async function runExperimentLanesFixedArgsTool(
   toolArgs: Record<string, unknown>,
   signal?: AbortSignal,
   onProgress?: (snapshot: LaneProgressSnapshot) => void,
+  inheritedModel?: string | { provider?: string; id?: string },
+  inheritedThinking?: LaneThinkingLevel,
 ): Promise<{ records: LaneRunRecord[]; fairness: CapabilityFairnessTelemetry }> {
   const experiment = loaded.experiment;
   const timeoutMs = timeoutMsOf(experiment);
@@ -1871,7 +1937,9 @@ export async function runExperimentLanesFixedArgsTool(
   const laneCapabilities = new Map<string, LaneCapabilityInfo>();
 
   const lanePromises = experiment.lanes.map(async (lane, laneIndex): Promise<LaneRunRecord> => {
-    setLaneProgress(lane.id, "running");
+    const effectiveLaneModel = resolveLaneModelOverride(lane, inheritedModel);
+    const effectiveLaneThinking = resolveLaneThinkingOverride(lane, inheritedThinking);
+    setLaneProgress(lane.id, "running", { laneModel: effectiveLaneModel });
 
     const laneDir = join(run.dir, "lanes", lane.id);
     mkdirSync(laneDir, { recursive: true });
@@ -1906,6 +1974,8 @@ export async function runExperimentLanesFixedArgsTool(
           lane_id: lane.id,
           status: "error",
           error: `Failed to create worktree: ${wtAdd.stderr || wtAdd.stdout}`,
+          lane_model: effectiveLaneModel,
+          lane_thinking: effectiveLaneThinking,
         };
       }
 
@@ -1990,6 +2060,8 @@ export async function runExperimentLanesFixedArgsTool(
           "--no-prompt-templates",
           "--no-themes",
         ];
+        appendLaneModelArg(piArgs, lane, inheritedModel);
+        appendLaneThinkingArg(piArgs, lane, inheritedThinking);
 
         if (process.env.PI_LAB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
           piArgs.push("--mode", "json");
@@ -2044,6 +2116,8 @@ export async function runExperimentLanesFixedArgsTool(
           patch_bytes: patch.patchBytes,
           session_file: sessionPath,
           worktree_path: worktreePath,
+          lane_model: effectiveLaneModel,
+          lane_thinking: effectiveLaneThinking,
           lane_harness_requested: laneHarnessRequested,
           lane_harness_used: laneHarnessUsed,
           lane_harness_fallback_reason: laneHarnessFallbackReason,
@@ -2087,6 +2161,8 @@ export async function runExperimentLanesFixedArgsTool(
         patch_bytes: patch.patchBytes,
         session_file: sessionPath,
         worktree_path: worktreePath,
+        lane_model: effectiveLaneModel,
+        lane_thinking: effectiveLaneThinking,
         lane_harness_requested: laneHarnessRequested,
         lane_harness_used: laneHarnessUsed,
         lane_harness_fallback_reason: laneHarnessFallbackReason,
@@ -2173,6 +2249,7 @@ export async function runExperimentLanesSingleCall(
   signal?: AbortSignal,
   onProgress?: (snapshot: LaneProgressSnapshot) => void,
   inheritedModel?: string,
+  inheritedThinking?: LaneThinkingLevel,
 ): Promise<{ records: LaneRunRecord[]; fairness: CapabilityFairnessTelemetry }> {
   const experiment = loaded.experiment;
   const timeoutMs = timeoutMsOf(experiment);
@@ -2256,6 +2333,7 @@ export async function runExperimentLanesSingleCall(
 
   const lanePromises = experiment.lanes.map(async (lane, laneIndex): Promise<LaneRunRecord> => {
     const effectiveLaneModel = resolveLaneModelOverride(lane, inheritedModel);
+    const effectiveLaneThinking = resolveLaneThinkingOverride(lane, inheritedThinking);
     setLaneProgress(lane.id, "running", { laneModel: effectiveLaneModel });
 
     const laneDir = join(run.dir, "lanes", lane.id);
@@ -2288,6 +2366,7 @@ export async function runExperimentLanesSingleCall(
           status: "error",
           error: `Failed to create worktree: ${wtAdd.stderr || wtAdd.stdout}`,
           lane_model: effectiveLaneModel,
+          lane_thinking: effectiveLaneThinking,
           lane_harness_used: "pi_prompt",
         };
       }
@@ -2323,6 +2402,7 @@ export async function runExperimentLanesSingleCall(
         "--no-themes",
       ];
       appendLaneModelArg(piArgs, lane, inheritedModel);
+      appendLaneThinkingArg(piArgs, lane, inheritedThinking);
 
       if (process.env.PI_LAB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
         piArgs.push("--mode", "json");
@@ -2369,6 +2449,7 @@ export async function runExperimentLanesSingleCall(
           session_file: sessionPath,
           worktree_path: worktreePath,
           lane_model: effectiveLaneModel,
+          lane_thinking: effectiveLaneThinking,
           lane_harness_used: "pi_prompt",
         };
       }
@@ -2398,6 +2479,7 @@ export async function runExperimentLanesSingleCall(
         session_file: sessionPath,
         worktree_path: worktreePath,
         lane_model: effectiveLaneModel,
+        lane_thinking: effectiveLaneThinking,
         lane_harness_used: "pi_prompt",
       };
     } catch (err: any) {
@@ -2419,6 +2501,7 @@ export async function runExperimentLanesSingleCall(
         status: "error",
         error: err?.message ?? String(err),
         lane_model: effectiveLaneModel,
+        lane_thinking: effectiveLaneThinking,
         lane_harness_used: "pi_prompt",
       };
     } finally {
@@ -2481,6 +2564,7 @@ export async function runExperimentLanesMultiCall(
   signal?: AbortSignal,
   onProgress?: (snapshot: LaneProgressSnapshot) => void,
   inheritedModel?: string,
+  inheritedThinking?: LaneThinkingLevel,
 ): Promise<LaneRunRecord[]> {
   const experiment = loaded.experiment;
   const timeoutMs = timeoutMsOf(experiment);
@@ -2562,6 +2646,7 @@ export async function runExperimentLanesMultiCall(
 
   const lanePromises = experiment.lanes.map(async (lane, laneIndex): Promise<LaneRunRecord> => {
     const effectiveLaneModel = resolveLaneModelOverride(lane, inheritedModel);
+    const effectiveLaneThinking = resolveLaneThinkingOverride(lane, inheritedThinking);
     setLaneProgress(lane.id, "running", { laneModel: effectiveLaneModel });
 
     const laneDir = join(run.dir, "lanes", lane.id);
@@ -2588,6 +2673,7 @@ export async function runExperimentLanesMultiCall(
           status: "error",
           error: `Failed to create worktree: ${wtAdd.stderr || wtAdd.stdout}`,
           lane_model: effectiveLaneModel,
+          lane_thinking: effectiveLaneThinking,
           lane_harness_used: "pi_prompt",
         };
       }
@@ -2605,6 +2691,7 @@ export async function runExperimentLanesMultiCall(
         "--no-themes",
       ];
       appendLaneModelArg(piArgs, lane, inheritedModel);
+      appendLaneThinkingArg(piArgs, lane, inheritedThinking);
 
       if (process.env.PI_LAB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
         piArgs.push("--mode", "json");
@@ -2651,6 +2738,7 @@ export async function runExperimentLanesMultiCall(
           session_file: sessionPath,
           worktree_path: worktreePath,
           lane_model: effectiveLaneModel,
+          lane_thinking: effectiveLaneThinking,
           lane_harness_used: "pi_prompt",
         };
       }
@@ -2680,6 +2768,7 @@ export async function runExperimentLanesMultiCall(
         session_file: sessionPath,
         worktree_path: worktreePath,
         lane_model: effectiveLaneModel,
+        lane_thinking: effectiveLaneThinking,
         lane_harness_used: "pi_prompt",
       };
     } catch (err: any) {
@@ -2693,6 +2782,7 @@ export async function runExperimentLanesMultiCall(
         status: "error",
         error: err?.message ?? String(err),
         lane_model: effectiveLaneModel,
+        lane_thinking: effectiveLaneThinking,
         lane_harness_used: "pi_prompt",
       };
     } finally {

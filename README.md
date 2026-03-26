@@ -58,14 +58,34 @@ The easiest path is:
 
 What the clanker should usually do:
 - inspect the target tool or workflow before choosing `fixed_args`, `lane_single_call`, or `lane_multi_call`
+- if the target is a builtin tool, ask whether you want a transparent same-name replacement (for example `edit`) or an explicit lab-only proxy tool name (for example `edit_experiment`)
+- when you want normal agent requests to naturally use the replacement, keep the replacement under the builtin name instead of teaching the agent a differently named proxy
 - create project-local experiment config in `.pi/lab/experiments/*.json`
-- create or wire lane files and prompts as needed
+- create or wire lane files, prompts, and any companion extension needed for builtin-tool replacement, prompt guidance, or guardrails
 - keep one lane as the baseline/fallback lane
 - tell you how to run and inspect the experiment
 
 If you want examples after that:
 - [Config examples](docs/config-examples.md)
 - [Strategies](docs/strategies.md)
+
+## Builtin tool replacement pattern
+
+When the compared tool is a builtin like `edit`, `write`, or `bash`, there are two different goals:
+
+1. **Explicit lab proxy**
+   - give the experiment a separate tool name such as `edit_experiment`
+   - use this only when you want users and agents to call the lab flow explicitly
+2. **Transparent replacement**
+   - keep the replacement under the builtin name such as `edit`
+   - use this when you want normal requests like “edit this file” to naturally hit the replacement
+
+For transparent replacement, `pi-lab` config should usually be paired with a companion custom extension:
+- use `deactivate_builtin_tools` in the experiment config when the builtin should disappear from the main session's active tool list
+- also add a custom extension that blocks or redirects the builtin behavior as needed, explains that the builtin is not directly available, points the agent to the replacement under the same name, and adds any guardrails you want
+- if you expose a differently named proxy tool instead of `edit`, most agents will not treat it as the default editor unless you add very strong extra guidance
+
+`deactivate_builtin_tools` only manages the active tool list for the pi-lab-managed main session. It does **not** by itself add repo-specific prompt guidance, discoverability, or fallback blocking such as “use `edit`, not `write`, for existing files”.
 
 ## Git requirement
 

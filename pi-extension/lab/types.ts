@@ -1,5 +1,6 @@
 export type WinnerMode = "hardcoded" | "formula" | "llm" | "blend";
 export type ExecutionStrategy = "fixed_args" | "lane_single_call" | "lane_multi_call";
+export type LaneThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export interface TriggerPolicy {
   sample_rate?: number;
@@ -21,6 +22,7 @@ export interface LaneConfig {
   label?: string;
   baseline?: boolean;
   model?: string;
+  thinking?: LaneThinkingLevel;
   extensions: string[];
 }
 
@@ -74,6 +76,7 @@ export interface LabExperiment {
   id: string;
   enabled?: boolean;
   tool: ToolConfig;
+  deactivate_builtin_tools?: string[];
   trigger?: TriggerPolicy;
   execution?: ExecutionConfig;
   winner: WinnerConfig;
@@ -109,6 +112,7 @@ export interface LaneRunRecord {
   worktree_path?: string;
   process_exit_code?: number;
   lane_model?: string;
+  lane_thinking?: LaneThinkingLevel;
   lane_harness_used?: "direct" | "pi_prompt";
   lane_harness_requested?: "direct" | "pi_prompt";
   lane_harness_fallback_reason?: LaneHarnessFallbackReason;

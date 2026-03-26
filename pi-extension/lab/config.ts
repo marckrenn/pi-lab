@@ -59,6 +59,7 @@ function normalizeLanes(rawLanes: unknown): LaneConfig[] {
       label: typeof rawLane?.label === "string" && rawLane.label.trim() ? rawLane.label.trim() : id,
       baseline: rawLane?.baseline === true,
       model: typeof rawLane?.model === "string" && rawLane.model.trim() ? rawLane.model.trim() : undefined,
+      thinking: typeof rawLane?.thinking === "string" && rawLane.thinking.trim() ? rawLane.thinking.trim() as LaneConfig["thinking"] : undefined,
       extensions: Array.isArray(rawLane?.extensions) ? rawLane.extensions.filter((v: unknown) => typeof v === "string") : [],
     } satisfies LaneConfig;
   });
@@ -97,6 +98,9 @@ function normalizeExperiment(raw: any): LabExperiment {
           ? raw.tool.parameters_schema
           : undefined,
     },
+    deactivate_builtin_tools: Array.isArray(raw?.deactivate_builtin_tools)
+      ? raw.deactivate_builtin_tools.filter((value: unknown) => typeof value === "string")
+      : raw?.deactivate_builtin_tools,
     trigger: raw?.trigger && typeof raw.trigger === "object" ? {
       sample_rate: raw.trigger.sample_rate,
       when_path_regex: raw.trigger.when_path_regex,
@@ -206,6 +210,12 @@ export function debugUiOf(experiment: LabExperiment): "cmux" | "none" {
 
 export function formulaConfigOf(experiment: LabExperiment): FormulaWinnerConfig {
   return experiment.winner?.formula ?? {};
+}
+
+export function deactivateBuiltinToolsOf(experiment: LabExperiment): string[] {
+  const raw = (experiment as any).deactivate_builtin_tools;
+  if (!Array.isArray(raw)) return [];
+  return Array.from(new Set(raw.filter((value: unknown): value is string => typeof value === "string" && value.trim()).map((value) => value.trim())));
 }
 
 export function llmConfigOf(experiment: LabExperiment): LlmWinnerConfig {
@@ -335,6 +345,8 @@ export function canonicalExecutionStrategy(
   return "invalid";
 }
 
+const KNOWN_BUILTIN_TOOL_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+
 export function validateExperimentConfig(experiment: LabExperiment, _path?: string): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -346,6 +358,26 @@ export function validateExperimentConfig(experiment: LabExperiment, _path?: stri
 
   if (!toolNameOf(experiment).trim()) {
     errors.push("tool.name is required.");
+  }
+
+  const rawDeactivatedBuiltins = (experiment as any).deactivate_builtin_tools;
+  if (rawDeactivatedBuiltins !== undefined) {
+    if (!Array.isArray(rawDeactivatedBuiltins)) {
+      errors.push("deactivate_builtin_tools must be an array of tool names.");
+    } else {
+      for (const toolName of rawDeactivatedBuiltins) {
+        if (typeof toolName !== "string" || !toolName.trim()) {
+          errors.push("deactivate_builtin_tools entries must be non-empty strings.");
+          continue;
+        }
+        if (!KNOWN_BUILTIN_TOOL_NAMES.has(toolName.trim())) {
+          warnings.push(
+            `deactivate_builtin_tools includes '${toolName}', which is not a known builtin tool name. ` +
+            `Known builtins: ${Array.from(KNOWN_BUILTIN_TOOL_NAMES).join(", ")}.`,
+          );
+        }
+      }
+    }
   }
 
   const winnerMode = experiment.winner?.mode;
@@ -375,6 +407,8 @@ export function validateExperimentConfig(experiment: LabExperiment, _path?: stri
     errors.push("At least one lane is required.");
   }
 
+  const validThinkingLevels = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+
   const laneIds = new Set<string>();
   for (const lane of experiment.lanes) {
     if (!lane.id) errors.push("Every lane must resolve to an id.");
@@ -385,6 +419,9 @@ export function validateExperimentConfig(experiment: LabExperiment, _path?: stri
     laneIds.add(lane.id);
     if (lane.model != null && (typeof lane.model !== "string" || !lane.model.trim())) {
       errors.push(`Lane '${lane.id}' model must be a non-empty string when provided.`);
+    }
+    if (lane.thinking != null && !validThinkingLevels.has(lane.thinking)) {
+      errors.push(`Lane '${lane.id}' thinking must be one of: off, minimal, low, medium, high, xhigh.`);
     }
     if (!Array.isArray(lane.extensions) || lane.extensions.length === 0) {
       errors.push(`Lane '${lane.id}' must have at least one extension.`);

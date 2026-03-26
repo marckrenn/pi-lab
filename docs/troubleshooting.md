@@ -79,3 +79,20 @@ PI_LAB_DEBUG_UI=cmux
 PI_LAB_KEEP_PANES=1
 PI_LAB_DEBUG_JSON=1
 ```
+
+## Agent keeps choosing the wrong tool name
+
+Common symptom:
+- you expected the agent to use `edit`
+- but it keeps reaching for `write` or a differently named proxy such as `edit_experiment`
+
+Usually fix it like this:
+1. if the tool should behave like a builtin replacement, keep the replacement under the builtin name (`edit`, not `edit_experiment`)
+2. add `deactivate_builtin_tools` in the experiment config when the builtin should disappear from the main session's active tool list
+3. add a companion custom extension that blocks or redirects the builtin behavior as needed, tells the agent the builtin is not directly available, and tells it to use the replacement under the same name
+4. add guardrails in that extension if needed, for example blocking `write` on existing files
+
+Important nuance:
+- `deactivate_builtin_tools` updates the active tool list for the pi-lab-managed main session
+- it does **not** by itself add prompt guidance or explain why the replacement should be preferred
+- if you expose a separate proxy tool name, agents will usually treat it as a special-purpose tool rather than the default builtin replacement

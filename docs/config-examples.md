@@ -25,6 +25,73 @@ Notes:
 - omitting `trigger` means the experiment can match every call to `tool.name`
 - omitting `execution` defaults to `fixed_args`
 - if no lane is marked as `baseline`, the first lane becomes baseline automatically
+- optional `deactivate_builtin_tools` removes builtins from the active tool list for the main session; if pi-lab also registers a tool with the same name, that lab tool stays active
+
+## Deactivate builtins for a session
+
+```jsonc
+{
+  "id": "intercept-edit-only",
+  "enabled": true,
+  "tool": { "name": "edit" },
+  "deactivate_builtin_tools": ["edit"],
+  "execution": { "strategy": "lane_multi_call" },
+  "winner": { "mode": "formula" },
+  "lanes": [
+    { "id": "baseline", "baseline": true, "extensions": ["./lanes/edit/builtin.ts"] },
+    { "id": "variant", "extensions": ["./lanes/edit/variant.ts"] }
+  ]
+}
+```
+
+This is useful when you want the main session to stop offering the builtin tool directly and route calls through a pi-lab interceptor instead.
+
+Behavior notes:
+- this field is optional
+- it is applied in the main session at `session_start`
+- values should be builtin tool names such as `read`, `bash`, `edit`, `write`, `grep`, `find`, or `ls`
+- if pi-lab also registers a tool with the same name, that lab tool remains active after the builtin is deactivated
+- this changes the active tool list, but by itself it does not add prompt guidance or explain to the agent why it should prefer the replacement
+- for builtin replacement patterns you usually also want a companion custom extension that blocks or redirects the builtin behavior as needed, says the builtin is not directly available, and points the agent to the replacement under the same name
+
+## Transparent builtin replacement pattern
+
+If you want the agent to keep using the builtin name naturally, keep the replacement under that same builtin name.
+
+Example goal:
+- user says “edit this file”
+- agent should call `edit`
+- `pi-lab` should intercept that `edit` call behind the scenes
+
+Config side:
+
+```jsonc
+{
+  "id": "transparent-edit-replacement",
+  "enabled": true,
+  "tool": {
+    "name": "edit",
+    "description": "Primary edit tool for this repo. The builtin edit tool is not directly available here."
+  },
+  "deactivate_builtin_tools": ["edit"],
+  "execution": { "strategy": "lane_multi_call" },
+  "winner": { "mode": "formula" },
+  "lanes": [
+    { "id": "baseline", "baseline": true, "extensions": ["./lanes/edit/builtin.ts"] },
+    { "id": "variant", "extensions": ["./lanes/edit/variant.ts"] }
+  ]
+}
+```
+
+Companion extension side:
+- add a custom project/package extension when you want strong discoverability and guardrails
+- tell the agent that the builtin `edit` tool is not directly available, block or redirect the builtin path as needed, and tell it to use the repo's `edit` tool instead
+- if needed, block undesired fallbacks such as using `write` to overwrite existing files
+- if you expose a separate proxy name like `edit_experiment`, treat that as an explicit lab-only tool, not as the default replacement for `edit`
+
+Rule of thumb:
+- if you want natural builtin-like usage, register the replacement as `edit`
+- if you want an explicit benchmark/proxy flow, use a distinct name such as `edit_experiment`
 
 ## Hardcoded winner
 
@@ -67,7 +134,7 @@ Notes:
 }
 ```
 
-## Lane model override
+## Lane model / thinking override
 
 ```jsonc
 {
@@ -77,13 +144,15 @@ Notes:
   "winner": { "mode": "formula" },
   "lanes": [
     { "id": "baseline", "baseline": true, "extensions": ["./lanes/a.ts"] },
-    { "id": "fast", "model": "openai/gpt-5-mini", "extensions": ["./lanes/b.ts"] },
-    { "id": "deep", "model": "anthropic/claude-sonnet-4-6", "extensions": ["./lanes/c.ts"] }
+    { "id": "fast", "model": "openai/gpt-5-mini", "thinking": "low", "extensions": ["./lanes/b.ts"] },
+    { "id": "deep", "model": "anthropic/claude-sonnet-4-6", "thinking": "high", "extensions": ["./lanes/c.ts"] }
   ]
 }
 ```
 
 If `model` is omitted, `lane_single_call` and `lane_multi_call` inherit the main session model.
+
+If `thinking` is omitted, `lane_single_call` and `lane_multi_call` inherit the main session thinking level. Valid values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
 
 ## LLM winner
 

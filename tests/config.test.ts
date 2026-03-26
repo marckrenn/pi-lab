@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
-import { canonicalExecutionStrategy, loadExperiments, setExperimentEnabled, validateExperimentConfig } from "../pi-extension/lab/config.ts";
+import { canonicalExecutionStrategy, deactivateBuiltinToolsOf, loadExperiments, setExperimentEnabled, validateExperimentConfig } from "../pi-extension/lab/config.ts";
 
 function mkExp(id: string, tool: string, winner: string = "formula") {
   return {
@@ -118,6 +118,37 @@ describe("config loading", () => {
     expect(result.warnings.some((w) => w.includes("when_path_regex"))).toBe(true);
   });
 
+  test("loads deactivate_builtin_tools and normalizes duplicates", () => {
+    const experiment = {
+      id: "x",
+      tool: { name: "edit" },
+      deactivate_builtin_tools: ["edit", " bash ", "edit"],
+      winner: { mode: "formula" },
+      lanes: [{ id: "A", baseline: true, extensions: ["./a.ts"] }],
+    } as any;
+
+    expect(deactivateBuiltinToolsOf(experiment)).toEqual(["edit", "bash"]);
+  });
+
+  test("validates deactivate_builtin_tools entries", () => {
+    const badType = validateExperimentConfig({
+      id: "x",
+      tool: { name: "edit" },
+      deactivate_builtin_tools: "edit",
+      winner: { mode: "formula" },
+      lanes: [{ id: "A", baseline: true, extensions: ["./a.ts"] }],
+    } as any);
+    expect(badType.errors.some((e) => e.includes("deactivate_builtin_tools must be an array"))).toBe(true);
+
+    const unknownBuiltin = validateExperimentConfig({
+      id: "x",
+      tool: { name: "edit" },
+      deactivate_builtin_tools: ["planner"],
+      winner: { mode: "formula" },
+      lanes: [{ id: "A", baseline: true, extensions: ["./a.ts"] }],
+    } as any);
+    expect(unknownBuiltin.warnings.some((w) => w.includes("not a known builtin tool name"))).toBe(true);
+  });
 
   test("rejects lane ids with unsupported characters", () => {
     const result = validateExperimentConfig({
@@ -153,7 +184,7 @@ describe("config loading", () => {
     expect(result.errors.some((e) => e.includes("valid regular expression"))).toBe(true);
   });
 
-  test("loads optional lane model overrides", () => {
+  test("loads optional lane model and thinking overrides", () => {
     const cwd = mkdtempSync(join(tmpdir(), "lab-config-model-"));
     const dir = join(cwd, ".pi", "lab", "experiments");
     mkdirSync(dir, { recursive: true });
@@ -165,14 +196,26 @@ describe("config loading", () => {
         tool: { name: "planner" },
         execution: { strategy: "lane_multi_call" },
         winner: { mode: "formula" },
-        lanes: [{ id: "A", baseline: true, model: "openai/gpt-5", extensions: ["./a.ts"] }],
+        lanes: [{ id: "A", baseline: true, model: "openai/gpt-5", thinking: "high", extensions: ["./a.ts"] }],
       }),
     );
 
     const loaded = loadExperiments(cwd);
     expect(loaded).toHaveLength(1);
     expect(loaded[0].experiment.lanes[0]?.model).toBe("openai/gpt-5");
+    expect(loaded[0].experiment.lanes[0]?.thinking).toBe("high");
     expect(loaded[0].validation?.errors ?? []).toEqual([]);
+  });
+
+  test("rejects invalid lane thinking overrides", () => {
+    const result = validateExperimentConfig({
+      id: "x",
+      tool: { name: "planner" },
+      winner: { mode: "formula" },
+      lanes: [{ id: "A", baseline: true, thinking: "turbo", extensions: ["./a.ts"] }],
+    } as any);
+
+    expect(result.errors.some((e) => e.includes("thinking must be one of"))).toBe(true);
   });
 
   test("rejects legacy fields after load normalization", () => {

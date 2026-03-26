@@ -10,6 +10,7 @@ import {
   directHarnessFallbackReasonForError,
   loadLaneToolsDirect,
   resolveLaneModelOverride,
+  resolveLaneThinkingOverride,
   runBaselineFixedArgsFallbackNoGit,
   runExperimentLanesFixedArgsTool,
 } from "../pi-extension/lab/runner.ts";
@@ -91,6 +92,12 @@ describe("direct lane harness extension compatibility checks", () => {
     );
     expect(resolveLaneModelOverride({ id: "B", extensions: ["./lane.ts"] }, "openai/gpt-5")).toBe("openai/gpt-5");
     expect(resolveLaneModelOverride({ id: "C", extensions: ["./lane.ts"] }, undefined)).toBeUndefined();
+  });
+
+  test("resolveLaneThinkingOverride prefers explicit lane thinking and otherwise inherits the main thinking level", () => {
+    expect(resolveLaneThinkingOverride({ id: "A", extensions: ["./lane.ts"], thinking: "high" }, "low")).toBe("high");
+    expect(resolveLaneThinkingOverride({ id: "B", extensions: ["./lane.ts"] }, "low")).toBe("low");
+    expect(resolveLaneThinkingOverride({ id: "C", extensions: ["./lane.ts"] }, undefined)).toBeUndefined();
   });
 
   test("fixed_args no-git fallback runs the baseline lane in-place", async () => {
