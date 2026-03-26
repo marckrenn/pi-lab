@@ -74,7 +74,7 @@ Config:
 Environment overrides:
 
 ```bash
-PI_AB_DEBUG_UI=cmux
-PI_AB_KEEP_PANES=1
-PI_AB_DEBUG_JSON=1
+PI_LAB_DEBUG_UI=cmux
+PI_LAB_KEEP_PANES=1
+PI_LAB_DEBUG_JSON=1
 ```

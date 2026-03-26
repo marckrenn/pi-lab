@@ -1,4 +1,4 @@
-import type { AbExperiment, LaneRunRecord } from "./types.ts";
+import type { LabExperiment, LaneRunRecord } from "./types.ts";
 import { formulaConfigOf, getBaselineLaneId } from "./config.ts";
 
 type Direction = "min" | "max";
@@ -104,7 +104,7 @@ export interface FormulaRanking {
 }
 
 export function rankFormulaLanes(
-  experiment: AbExperiment,
+  experiment: LabExperiment,
   lanes: LaneRunRecord[],
   extraMetricsByLane?: ExtraMetricsByLane,
 ): FormulaRanking {
@@ -146,7 +146,7 @@ export function rankFormulaLanes(
 }
 
 export function chooseFormulaLane(
-  experiment: AbExperiment,
+  experiment: LabExperiment,
   lanes: LaneRunRecord[],
 ): { laneId: string | null; reason: string } {
   if (lanes.length === 0) {

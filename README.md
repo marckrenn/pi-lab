@@ -92,7 +92,6 @@ Experiment configs are defined as JSON.
 
 Locations:
 - **project-local**: `.pi/lab/experiments/*.json`
-- **project-local legacy compat**: `.pi/ab/experiments/*.json`
 - **global**: `~/.pi/agent/lab/experiments/*.json`
 
 If the same experiment id exists in multiple places, project-local config wins.

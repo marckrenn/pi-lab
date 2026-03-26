@@ -23,6 +23,5 @@ bun test ./tests
 ## Notes
 
 - keep README user-focused; move deep internals into `docs/`
-- prefer `.pi/lab/experiments/` for project-local experiments
-- keep `.pi/ab/experiments/` compatibility intact unless intentionally removing legacy support
+- use `.pi/lab/experiments/` for project-local experiments
 - when updating `/lab`, keep both interactive and text command paths in sync

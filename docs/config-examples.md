@@ -2,12 +2,9 @@
 
 Experiment configs are JSON-only.
 
-Primary locations:
+Locations:
 - project-local: `.pi/lab/experiments/*.json`
 - global: `~/.pi/agent/lab/experiments/*.json`
-
-Legacy project-local compatibility:
-- `.pi/ab/experiments/*.json`
 
 ## Smallest valid config
 
@@ -74,7 +71,7 @@ Notes:
 
 ```jsonc
 {
-  "id": "planner-ab",
+  "id": "planner-lab",
   "tool": { "name": "planner" },
   "execution": { "strategy": "lane_multi_call" },
   "winner": { "mode": "formula" },
@@ -170,9 +167,9 @@ my-experiment-pack/
 Example package entrypoint:
 
 ```ts
-import { createAbExtension } from "@marckrenn/pi-lab";
+import { createLabExtension } from "@marckrenn/pi-lab";
 
-export default createAbExtension({
+export default createLabExtension({
   experimentDirs: ["./experiments"],
 });
 ```

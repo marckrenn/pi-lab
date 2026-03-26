@@ -70,7 +70,7 @@ export interface DebugConfig {
   ui?: "cmux" | "none";
 }
 
-export interface AbExperiment {
+export interface LabExperiment {
   id: string;
   enabled?: boolean;
   tool: ToolConfig;
@@ -87,7 +87,7 @@ export type LaneStatus = "not_run_mvp" | "success" | "error" | "timeout";
 export interface LoadedExperiment {
   source: string;
   path: string;
-  experiment: AbExperiment;
+  experiment: LabExperiment;
   validation?: {
     errors: string[];
     warnings: string[];

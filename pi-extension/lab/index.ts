@@ -53,7 +53,7 @@ import {
   type CapabilityFairnessTelemetry,
   type LaneProgressSnapshot,
 } from "./runner.ts";
-import { runAbGcCommand } from "./gc.ts";
+import { runLabGcCommand } from "./gc.ts";
 import { defaultPolicy, laneById, selectWinner } from "./winner.ts";
 import type { LaneRunRecord } from "./types.ts";
 
@@ -70,7 +70,7 @@ const ReplanFlowParams = Type.Object({
 });
 
 
-export interface AbExtensionOptions {
+export interface LabExtensionOptions {
   experimentDirs?: string[];
   /**
    * Optional base directory (absolute path or file:// URL) used to resolve relative experimentDirs.
@@ -419,7 +419,7 @@ function parseSummaryValue(summaryMarkdown: string, label: string): string | und
   return stripSimpleMarkdown(line.slice(label.length).trim());
 }
 
-function renderAbToolResult(
+function renderLabToolResult(
   result: any,
   options: { expanded?: boolean; isPartial?: boolean },
   theme: any,
@@ -429,8 +429,8 @@ function renderAbToolResult(
     return new Text(theme.fg("warning", "pi-lab running lanes..."), 0, 0);
   }
 
-  const ab = result?.details?.ab as { summary_markdown?: string; experiment_id?: string; winner_lane_id?: string; winner_mode?: string } | undefined;
-  const summaryMarkdown = ab?.summary_markdown;
+  const lab = result?.details?.lab as { summary_markdown?: string; experiment_id?: string; winner_lane_id?: string; winner_mode?: string } | undefined;
+  const summaryMarkdown = lab?.summary_markdown;
   if (!summaryMarkdown) {
     return fallback ? fallback(result, options, theme) : new Text(String(result?.content?.[0]?.type === "text" ? result.content[0].text : "Done."), 0, 0);
   }
@@ -443,9 +443,9 @@ function renderAbToolResult(
   const tieBreak = parseSummaryValue(summaryMarkdown, "**Tie break used:**");
   const notes = parseSummaryValue(summaryMarkdown, "**Notes:**");
 
-  let text = `\n${theme.fg("accent", `pi-lab summary · ${ab?.experiment_id ?? "experiment"}`)}`;
-  text += `\n${theme.fg("success", `winner ${ab?.winner_lane_id ?? "—"}`)}${theme.fg("dim", ` via ${ab?.winner_mode ?? "—"}`)}`;
-  if (selectionSource && selectionSource !== ab?.winner_mode) {
+  let text = `\n${theme.fg("accent", `pi-lab summary · ${lab?.experiment_id ?? "experiment"}`)}`;
+  text += `\n${theme.fg("success", `winner ${lab?.winner_lane_id ?? "—"}`)}${theme.fg("dim", ` via ${lab?.winner_mode ?? "—"}`)}`;
+  if (selectionSource && selectionSource !== lab?.winner_mode) {
     text += `\n${theme.fg("dim", `selection source: ${selectionSource}`)}`;
   }
   if (reason) {
@@ -543,7 +543,7 @@ export function resolveFixedArgsInterceptorSupport(
     existing?.description ??
     configured?.description ??
     builtin?.description ??
-    `AB fixed-args interceptor for '${toolName}'. Runs experiment lanes with identical tool args and returns the winning lane result.`;
+    `Lab fixed-args interceptor for '${toolName}'. Runs experiment lanes with identical tool args and returns the winning lane result.`;
   const parameters = existing?.parameters ?? configured?.parameters ?? builtin?.parameters;
 
   if (!parameters) {
@@ -648,13 +648,13 @@ async function runFixedArgsToolExperiment(
     intercepted_tool: toolName,
     intercepted_args: params,
     execution_strategy: canonicalExecutionStrategy(executionStrategyOf(experiment)),
-    lane_harness: process.env.PI_AB_LANE_HARNESS ?? inferLaneHarness(executionStrategyOf(experiment)),
+    lane_harness: process.env.PI_LAB_LANE_HARNESS ?? inferLaneHarness(executionStrategyOf(experiment)),
     trigger_bypassed: triggerBypassed || undefined,
     trigger_bypass_reason: triggerBypassed ? "no_native_delegate_for_nonmatching_trigger" : undefined,
     stage: "started",
   });
 
-  const laneStatusKey = "ab-lanes";
+  const laneStatusKey = "lab-lanes";
   const gitRepo = await detectGitRepository(ctx.cwd, signal);
 
   if (!gitRepo.ok) {
@@ -695,7 +695,7 @@ async function runFixedArgsToolExperiment(
       content: [{ type: "text", text: combineToolTextWithSummary(fallback.lane.output_text ?? "Done.", summaryMarkdown) }],
       details: {
         ...(fallback.patchText ? { diff: fallback.patchText, firstChangedLine: undefined } : {}),
-        ab: {
+        lab: {
           run_id: run.runId,
           experiment_id: experiment.id,
           winner_lane_id: fallback.lane.lane_id,
@@ -801,7 +801,7 @@ async function runFixedArgsToolExperiment(
       content: [{ type: "text", text: combineToolTextWithSummary(returnedLane.output_text ?? "Done.", summaryMarkdown) }],
       details: {
         ...(appliedPatchText ? { diff: appliedPatchText, firstChangedLine: undefined } : {}),
-        ab: {
+        lab: {
           run_id: run.runId,
           experiment_id: experiment.id,
           winner_lane_id: returnedLane.lane_id,
@@ -867,7 +867,7 @@ async function runSingleCallFlowExperiment(
     stage: "started",
   });
 
-  const laneStatusKey = "ab-lanes";
+  const laneStatusKey = "lab-lanes";
   const gitRepo = await detectGitRepository(ctx.cwd, signal);
 
   if (!gitRepo.ok) {
@@ -907,7 +907,7 @@ async function runSingleCallFlowExperiment(
     return {
       content: [{ type: "text", text: combineToolTextWithSummary(fallback.lane.output_text ?? "Flow completed.", summaryMarkdown) }],
       details: {
-        ab: {
+        lab: {
           run_id: run.runId,
           experiment_id: experiment.id,
           winner_lane_id: fallback.lane.lane_id,
@@ -979,7 +979,7 @@ async function runSingleCallFlowExperiment(
     return {
       content: [{ type: "text", text: combineToolTextWithSummary(selected.output_text ?? "Flow completed.", summaryMarkdown) }],
       details: {
-        ab: {
+        lab: {
           run_id: run.runId,
           experiment_id: experiment.id,
           winner_lane_id: selected.lane_id,
@@ -1045,7 +1045,7 @@ async function runMultiCallFlowExperiment(
     stage: "started",
   });
 
-  const laneStatusKey = "ab-lanes";
+  const laneStatusKey = "lab-lanes";
   const gitRepo = await detectGitRepository(ctx.cwd, signal);
 
   if (!gitRepo.ok) {
@@ -1085,7 +1085,7 @@ async function runMultiCallFlowExperiment(
     return {
       content: [{ type: "text", text: combineToolTextWithSummary(fallback.lane.output_text ?? "Flow completed.", summaryMarkdown) }],
       details: {
-        ab: {
+        lab: {
           run_id: run.runId,
           experiment_id: experiment.id,
           winner_lane_id: fallback.lane.lane_id,
@@ -1191,7 +1191,7 @@ async function runMultiCallFlowExperiment(
       content: [{ type: "text", text: combineToolTextWithSummary(returnedLane.output_text ?? "Flow completed.", summaryMarkdown) }],
       details: {
         ...(appliedPatch ? { diff: appliedPatch, firstChangedLine: undefined } : {}),
-        ab: {
+        lab: {
           run_id: run.runId,
           experiment_id: experiment.id,
           winner_lane_id: returnedLane.lane_id,
@@ -1253,7 +1253,7 @@ function experimentUiDescription(loaded: ReturnType<typeof loadExperiments>[numb
 async function showExperimentsManager(ctx: any, experimentDirs?: string[]) {
   const experiments = loadExperiments(ctx.cwd, { experimentDirs });
   if (experiments.length === 0) {
-    ctx.ui.notify("No A/B experiments found (global or project).", "warning");
+    ctx.ui.notify("No lab experiments found (global or project).", "warning");
     return;
   }
 
@@ -1441,13 +1441,13 @@ async function showMaintenanceMenu(ctx: any) {
     if (!gcChoice) return;
     let result;
     if (gcChoice === "Preview cleanup for this project") {
-      result = runAbGcCommand("", ctx.cwd);
+      result = runLabGcCommand("", ctx.cwd);
     } else if (gcChoice === "Delete old runs for this project (keep newest 10)") {
       const confirmed = await ctx.ui.confirm("Delete old runs?", "This deletes old lab runs for the current project and keeps the newest 10.");
       if (!confirmed) continue;
-      result = runAbGcCommand("--force", ctx.cwd);
+      result = runLabGcCommand("--force", ctx.cwd);
     } else {
-      result = runAbGcCommand("--all-projects", ctx.cwd);
+      result = runLabGcCommand("--all-projects", ctx.cwd);
     }
     ctx.ui.notify(result.message, result.level === "error" ? "error" : result.level === "warning" ? "warning" : "info");
   }
@@ -1478,7 +1478,7 @@ async function showLabsMenu(ctx: any, experimentDirs?: string[]) {
   }
 }
 
-function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]) {
+function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]) {
   const cooldownState = new Map<string, number>();
   const defaultEditToolRenderer = createEditTool(process.cwd());
 
@@ -1518,7 +1518,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
         label: existing?.name ?? toolName,
         description:
           support.description ??
-          `AB fixed-args interceptor for '${toolName}'. Runs experiment lanes with identical tool args and returns the winning lane result.`,
+          `Lab fixed-args interceptor for '${toolName}'. Runs experiment lanes with identical tool args and returns the winning lane result.`,
         parameters: support.parameters,
         async execute(toolCallId, params, signal, onUpdate, execCtx) {
           return runFixedArgsToolExperiment(
@@ -1534,11 +1534,11 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
           );
         },
         renderResult(result, options, theme) {
-          return renderAbToolResult(result, options, theme);
+          return renderLabToolResult(result, options, theme);
         },
       });
 
-      ctx.ui.notify(`Registered fixed_args A/B interceptor: ${toolName}`, "info");
+      ctx.ui.notify(`Registered fixed_args lab interceptor: ${toolName}`, "info");
     }
 
     const seenProxyTools = new Set<string>();
@@ -1556,7 +1556,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
         name: toolName,
         label: toolName,
         description:
-          `AB proxy-flow starter for '${toolName}'. Call this with task/context/constraints; lanes run either lane_single_call (single tool call) or lane_multi_call (multi-step replanning).`,
+          `Lab proxy-flow starter for '${toolName}'. Call this with task/context/constraints; lanes run either lane_single_call (single tool call) or lane_multi_call (multi-step replanning).`,
         parameters: ReplanFlowParams,
         async execute(_toolCallId, params, signal, _onUpdate, execCtx) {
           try {
@@ -1571,11 +1571,11 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
           return runMultiCallFlowExperiment(params, toolName, signal, execCtx, cooldownState, experimentDirs);
         },
         renderResult(result, options, theme) {
-          return renderAbToolResult(result, options, theme);
+          return renderLabToolResult(result, options, theme);
         },
       });
 
-      ctx.ui.notify(`Registered proxy A/B tool: ${toolName}`, "info");
+      ctx.ui.notify(`Registered proxy lab tool: ${toolName}`, "info");
     }
   });
 
@@ -1596,7 +1596,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
       if (cmd === "status" || cmd === "validate") {
         const experiments = loadExperiments(ctx.cwd, { experimentDirs });
         if (experiments.length === 0) {
-          ctx.ui.notify("No A/B experiments found (global or project).", "warning");
+          ctx.ui.notify("No lab experiments found (global or project).", "warning");
           return;
         }
 
@@ -1627,7 +1627,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
         const rest = cmd.slice("experiments".length).trim();
 
         if (experiments.length === 0) {
-          ctx.ui.notify("No A/B experiments found (global or project).", "warning");
+          ctx.ui.notify("No lab experiments found (global or project).", "warning");
           return;
         }
 
@@ -1691,7 +1691,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
       }
 
       if (cmd === "gc" || cmd.startsWith("gc ")) {
-        const result = runAbGcCommand(cmd.slice(2).trim(), ctx.cwd);
+        const result = runLabGcCommand(cmd.slice(2).trim(), ctx.cwd);
         ctx.ui.notify(result.message, result.level === "error" ? "error" : result.level === "warning" ? "warning" : "info");
         return;
       }
@@ -1704,10 +1704,10 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
     name: "edit",
     label: "edit",
     description:
-      "Edit a file by replacing exact text. A/B conductor intercepts this call when configured experiments match trigger policy.",
+      "Edit a file by replacing exact text. pi-lab intercepts this call when configured experiments match trigger policy.",
     parameters: EditParams,
     renderResult(result, options, theme) {
-      return renderAbToolResult(result, options, theme, (innerResult, innerOptions, innerTheme) => {
+      return renderLabToolResult(result, options, theme, (innerResult, innerOptions, innerTheme) => {
         if (typeof defaultEditToolRenderer.renderResult === "function") {
           return defaultEditToolRenderer.renderResult(innerResult, innerOptions as any, innerTheme);
         }
@@ -1718,7 +1718,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const nativeEdit = createEditTool(ctx.cwd);
 
-      if (process.env.PI_AB_LANE === "1" || process.env.PI_AB_GRADER === "1") {
+      if (process.env.PI_LAB_LANE === "1" || process.env.PI_LAB_GRADER === "1") {
         return nativeEdit.execute(toolCallId, params, signal, onUpdate);
       }
 
@@ -1739,12 +1739,12 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
         intercepted_tool: "edit",
         intercepted_args: { path: params.path, oldText_len: params.oldText.length, newText_len: params.newText.length },
         execution_strategy: canonicalExecutionStrategy(executionStrategyOf(experiment)),
-        lane_harness: process.env.PI_AB_LANE_HARNESS ?? inferLaneHarness(executionStrategyOf(experiment)),
+        lane_harness: process.env.PI_LAB_LANE_HARNESS ?? inferLaneHarness(executionStrategyOf(experiment)),
         stage: "started",
       });
 
       const policy = defaultPolicy(experiment);
-      const laneStatusKey = "ab-lanes";
+      const laneStatusKey = "lab-lanes";
       const gitRepo = await detectGitRepository(ctx.cwd, signal);
 
       if (!gitRepo.ok) {
@@ -1791,7 +1791,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
           content: [{ type: "text", text: combineToolTextWithSummary(fallback.lane.output_text ?? `Successfully replaced text in ${params.path}.`, summaryMarkdown) }],
           details: {
             ...(fallback.patchText ? { diff: fallback.patchText, firstChangedLine: undefined } : {}),
-            ab: {
+            lab: {
               run_id: run.runId,
               experiment_id: experiment.id,
               winner_lane_id: fallback.lane.lane_id,
@@ -1883,7 +1883,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
                   details: {
                     diff: patch,
                     firstChangedLine: undefined,
-                    ab: {
+                    lab: {
                       run_id: run.runId,
                       experiment_id: experiment.id,
                       winner_lane_id: baseline.lane_id,
@@ -1934,7 +1934,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
           details: {
             diff: patch,
             firstChangedLine: undefined,
-            ab: {
+            lab: {
               run_id: run.runId,
               experiment_id: experiment.id,
               winner_lane_id: selected.lane_id,
@@ -1964,7 +1964,7 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
               content: nativeFallback.content,
               details: {
                 ...(nativeFallback as any).details,
-                ab: {
+                lab: {
                   run_id: run.runId,
                   experiment_id: experiment.id,
                   configured_winner_mode: winnerModeOf(experiment),
@@ -2000,9 +2000,9 @@ function createAbConductorExtension(pi: ExtensionAPI, experimentDirs?: string[])
   });
 }
 
-export function createAbExtension(options: AbExtensionOptions = {}): (pi: ExtensionAPI) => void {
+export function createLabExtension(options: LabExtensionOptions = {}): (pi: ExtensionAPI) => void {
   const experimentDirs = resolveExperimentDirs(options.experimentDirs, options.baseDir);
-  return (pi) => createAbConductorExtension(pi, experimentDirs);
+  return (pi) => createLabConductorExtension(pi, experimentDirs);
 }
 
-export default createAbExtension();
+export default createLabExtension();

@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type {
-  AbExperiment,
+  LabExperiment,
   BlendWinnerConfig,
   ExecutionStrategy,
   FormulaWinnerConfig,
@@ -70,7 +70,7 @@ function normalizeLanes(rawLanes: unknown): LaneConfig[] {
   return lanes;
 }
 
-function normalizeExperiment(raw: any): AbExperiment {
+function normalizeExperiment(raw: any): LabExperiment {
   const lanes = normalizeLanes(raw?.lanes);
   const legacy: LegacyFlags = {
     target_tool: raw?.target_tool != null,
@@ -125,7 +125,7 @@ function normalizeExperiment(raw: any): AbExperiment {
   } as any;
 }
 
-function readExperimentFile(path: string): AbExperiment[] {
+function readExperimentFile(path: string): LabExperiment[] {
   const raw = readFileSync(path, "utf8");
   const parsed = JSON.parse(raw);
 
@@ -180,60 +180,53 @@ export function getProjectExperimentsDir(cwd: string): string {
   return join(getProjectLabDir(cwd), "experiments");
 }
 
-export function getLegacyProjectExperimentsDir(cwd: string): string {
-  return join(cwd, ".pi", "ab", "experiments");
-}
-
-export function toolNameOf(experiment: AbExperiment): string {
+export function toolNameOf(experiment: LabExperiment): string {
   return experiment.tool?.name ?? "";
 }
 
-export function winnerModeOf(experiment: AbExperiment): WinnerMode {
+export function winnerModeOf(experiment: LabExperiment): WinnerMode {
   return experiment.winner?.mode as WinnerMode;
 }
 
-export function executionStrategyOf(experiment: AbExperiment): ExecutionStrategy | undefined {
+export function executionStrategyOf(experiment: LabExperiment): ExecutionStrategy | undefined {
   return experiment.execution?.strategy;
 }
 
-export function timeoutMsOf(experiment: AbExperiment): number {
+export function timeoutMsOf(experiment: LabExperiment): number {
   return experiment.execution?.timeout_ms ?? 15000;
 }
 
-export function debugEnabledOf(experiment: AbExperiment): boolean {
+export function debugEnabledOf(experiment: LabExperiment): boolean {
   return experiment.debug?.enabled === true;
 }
 
-export function debugUiOf(experiment: AbExperiment): "cmux" | "none" {
+export function debugUiOf(experiment: LabExperiment): "cmux" | "none" {
   return experiment.debug?.ui ?? "none";
 }
 
-export function formulaConfigOf(experiment: AbExperiment): FormulaWinnerConfig {
+export function formulaConfigOf(experiment: LabExperiment): FormulaWinnerConfig {
   return experiment.winner?.formula ?? {};
 }
 
-export function llmConfigOf(experiment: AbExperiment): LlmWinnerConfig {
+export function llmConfigOf(experiment: LabExperiment): LlmWinnerConfig {
   return experiment.winner?.llm ?? {};
 }
 
-export function blendConfigOf(experiment: AbExperiment): BlendWinnerConfig {
+export function blendConfigOf(experiment: LabExperiment): BlendWinnerConfig {
   return experiment.winner?.blend ?? {};
 }
 
-export function getBaselineLaneId(experiment: AbExperiment): string {
+export function getBaselineLaneId(experiment: LabExperiment): string {
   return experiment.lanes.find((l) => l.baseline)?.id ?? experiment.lanes[0]?.id ?? "";
 }
 
-export function getHardcodedWinnerLaneId(experiment: AbExperiment): string {
+export function getHardcodedWinnerLaneId(experiment: LabExperiment): string {
   return experiment.winner?.hardcoded_lane ?? getBaselineLaneId(experiment);
 }
 
 export function loadExperiments(cwd: string, options?: ExperimentLoadOptions): LoadedExperiment[] {
   const globalFiles = listExperimentFiles(getGlobalExperimentsDir());
-  const projectFiles = [
-    ...listExperimentFiles(getLegacyProjectExperimentsDir(cwd)),
-    ...listExperimentFiles(getProjectExperimentsDir(cwd)),
-  ];
+  const projectFiles = listExperimentFiles(getProjectExperimentsDir(cwd));
   const packageSources = collectExtraExperimentFiles(cwd, options?.experimentDirs);
 
   const merged = new Map<string, LoadedExperiment>();
@@ -342,7 +335,7 @@ export function canonicalExecutionStrategy(
   return "invalid";
 }
 
-export function validateExperimentConfig(experiment: AbExperiment, _path?: string): { errors: string[]; warnings: string[] } {
+export function validateExperimentConfig(experiment: LabExperiment, _path?: string): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
   const warnings: string[] = [];
 

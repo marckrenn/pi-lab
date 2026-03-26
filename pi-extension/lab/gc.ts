@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { getGlobalLabDir, getProjectLabDir } from "./config.ts";
 
-export interface AbGcOptions {
+export interface LabGcOptions {
   keepLast: number;
   olderThanMs?: number;
   force: boolean;
@@ -10,7 +10,7 @@ export interface AbGcOptions {
   allProjects: boolean;
 }
 
-export interface AbGcResult {
+export interface LabGcResult {
   level: "info" | "warning" | "error";
   message: string;
 }
@@ -24,9 +24,9 @@ function parseDurationToMs(value: string): number | null {
   return amount * factor;
 }
 
-function parseGcOptions(args: string): { options?: AbGcOptions; error?: string; help?: boolean } {
+function parseGcOptions(args: string): { options?: LabGcOptions; error?: string; help?: boolean } {
   const tokens = args.split(/\s+/).filter(Boolean);
-  const options: AbGcOptions = { keepLast: 10, force: false, allProjects: false };
+  const options: LabGcOptions = { keepLast: 10, force: false, allProjects: false };
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -92,7 +92,7 @@ function parseRunTimestampMs(runDir: string, runId: string): number {
   }
 }
 
-export function runAbGcCommand(args: string, cwd: string): AbGcResult {
+export function runLabGcCommand(args: string, cwd: string): LabGcResult {
   const parsed = parseGcOptions(args.trim());
   if (parsed.help) {
     return {
@@ -157,7 +157,7 @@ export function runAbGcCommand(args: string, cwd: string): AbGcResult {
   }
 
   if (deletions.length === 0) {
-    return { level: "info", message: `AB GC: nothing to delete (scanned ${scannedRuns} runs).` };
+    return { level: "info", message: `Lab GC: nothing to delete (scanned ${scannedRuns} runs).` };
   }
 
   if (!options.force) {
@@ -168,7 +168,7 @@ export function runAbGcCommand(args: string, cwd: string): AbGcResult {
     return {
       level: "warning",
       message: [
-        `AB GC dry-run: would delete ${deletions.length} runs (scanned ${scannedRuns}).`,
+        `Lab GC dry-run: would delete ${deletions.length} runs (scanned ${scannedRuns}).`,
         sample,
         deletions.length > 8 ? `…and ${deletions.length - 8} more` : "",
         "Re-run with --force to delete.",
@@ -188,6 +188,6 @@ export function runAbGcCommand(args: string, cwd: string): AbGcResult {
 
   return {
     level: "info",
-    message: `AB GC deleted ${deleted}/${deletions.length} runs (scanned ${scannedRuns}).`,
+    message: `Lab GC deleted ${deleted}/${deletions.length} runs (scanned ${scannedRuns}).`,
   };
 }

@@ -1,7 +1,7 @@
 import { blendConfigOf, getBaselineLaneId, getHardcodedWinnerLaneId, toolNameOf, winnerModeOf } from "./config.ts";
 import { chooseFormulaLane, rankFormulaLanes, type ExtraMetricsByLane } from "./selection.ts";
 import { runGradingProcess } from "./grading.ts";
-import type { AbExperiment, LaneRunRecord, LoadedExperiment, WinnerSelection } from "./types.ts";
+import type { LabExperiment, LaneRunRecord, LoadedExperiment, WinnerSelection } from "./types.ts";
 
 export function defaultPolicy(experiment: LoadedExperiment["experiment"]) {
   const fp = experiment.failure_policy ?? {};
@@ -58,10 +58,10 @@ function formulaFallback(
 }
 
 function blendFinalScoringExperiment(
-  experiment: AbExperiment,
+  experiment: LabExperiment,
   formulaWeight: number,
   llmWeight: number,
-): AbExperiment {
+): LabExperiment {
   const blend = blendConfigOf(experiment);
   const objective =
     blend.objective ??

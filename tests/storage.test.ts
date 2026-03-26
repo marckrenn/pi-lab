@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "bun:test";
 import { createRunContext, writeLaneRecords, writeRunManifest } from "../pi-extension/lab/storage.ts";
-import type { AbExperiment, LaneRunRecord } from "../pi-extension/lab/types.ts";
+import type { LabExperiment, LaneRunRecord } from "../pi-extension/lab/types.ts";
 
 const originalHome = process.env.HOME;
 let cleanupProjectDir: string | undefined;
@@ -29,7 +29,7 @@ describe("project run jsonl logging", () => {
 
     const run = createRunContext(cwd);
     cleanupProjectDir = run.projectDir;
-    const experiment: AbExperiment = {
+    const experiment: LabExperiment = {
       id: "example-exp",
       tool: { name: "edit" },
       winner: { mode: "formula" },

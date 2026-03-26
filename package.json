@@ -8,9 +8,9 @@
   "keywords": [
     "pi-package",
     "pi-extension",
-    "ab-testing"
+    "lab-testing"
   ],
-  "description": "pi A/B extension runner for lane-level experiments.",
+  "description": "pi lab extension runner for lane-level experiments.",
   "scripts": {
     "typecheck": "bun -e \"await import('./pi-extension/lab/index.ts'); await import('./pi-extension/lab/config.ts'); await import('./pi-extension/lab/runner.ts'); await import('./pi-extension/lab/grading.ts'); await import('./pi-extension/lab/selection.ts'); await import('./pi-extension/lab/winner.ts'); console.log('typecheck-ok')\"",
     "test": "bun test ./tests"

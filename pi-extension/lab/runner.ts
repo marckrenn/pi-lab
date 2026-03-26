@@ -76,7 +76,7 @@ function inferLaneHarnessForStrategy(executionStrategy: unknown): "direct" | "pi
 }
 
 function resolveLaneHarness(executionStrategy: unknown): "direct" | "pi_prompt" {
-  const override = process.env.PI_AB_LANE_HARNESS?.toLowerCase();
+  const override = process.env.PI_LAB_LANE_HARNESS?.toLowerCase();
   if (override === "direct" || override === "pi_prompt") return override;
   return inferLaneHarnessForStrategy(executionStrategy);
 }
@@ -315,7 +315,7 @@ async function runLaneDirect(
 
     try {
       const result = await editTool.execute(
-        `ab-lane-${lane.id}`,
+        `lab-lane-${lane.id}`,
         {
           path: options.editArgs.path,
           oldText: options.editArgs.oldText,
@@ -376,7 +376,7 @@ async function runLaneDirectFixedArgs(
 
     try {
       const result = await targetTool.execute(
-        `ab-lane-${lane.id}`,
+        `lab-lane-${lane.id}`,
         options.args,
         options.signal,
         undefined,
@@ -411,7 +411,7 @@ function lanePrompt(lane: LaneConfig, editArgs: { path: string; oldText: string;
   });
 
   return [
-    `You are lane ${lane.id} in an A/B experiment.`,
+    `You are lane ${lane.id} in a lab experiment.`,
     "Execute EXACTLY ONE edit tool call.",
     "Use the EXACT JSON arguments below without modifications (no trimming, no added newlines, no escaping changes).",
     "Do not call any other mutating tools.",
@@ -427,7 +427,7 @@ function laneMultiCallPrompt(
   args: { task: string; context?: string; constraints?: string },
 ): string {
   return [
-    `You are lane ${lane.id} in an A/B experiment for tool '${targetTool}'.`,
+    `You are lane ${lane.id} in a lab experiment for tool '${targetTool}'.`,
     "You may call tools available in this lane to solve the user task.",
     "Lane APIs may differ from other lanes. Choose the correct API for THIS lane.",
     "You MUST call at least one lane-specific non-builtin tool before giving the final answer.",
@@ -448,7 +448,7 @@ function laneSingleCallPrompt(
   args: { task: string; context?: string; constraints?: string },
 ): string {
   return [
-    `You are lane ${lane.id} in an A/B experiment for tool '${targetTool}'.`,
+    `You are lane ${lane.id} in a lab experiment for tool '${targetTool}'.`,
     `Call the target tool '${targetTool}' EXACTLY ONCE using this lane's available schema.`,
     "Do NOT call any other tools.",
     "After the tool call, respond with exactly: LANE_DONE",
@@ -729,7 +729,7 @@ function laneFixedArgsPrompt(
   const exactArgs = JSON.stringify(args);
 
   return [
-    `You are lane ${lane.id} in an A/B experiment for tool '${targetTool}'.`,
+    `You are lane ${lane.id} in a lab experiment for tool '${targetTool}'.`,
     `Execute EXACTLY ONE ${targetTool} tool call.`,
     "Use the EXACT JSON arguments below without modifications.",
     "Do not call any other mutating tools.",
@@ -975,12 +975,12 @@ async function runLanePi(
       cwd: options.worktreePath,
       timeoutMs: options.timeoutMs,
       signal: options.signal,
-      env: { ...process.env, PI_AB_LANE: "1" },
+      env: { ...process.env, PI_LAB_LANE: "1" },
     });
   }
 
-  const sentinel = "__PI_AB_DONE_";
-  const piCmd = ["PI_AB_LANE=1", "pi", ...piArgs.map((a) => shellEscape(a))].join(" ");
+  const sentinel = "__PI_LAB_DONE_";
+  const piCmd = ["PI_LAB_LANE=1", "pi", ...piArgs.map((a) => shellEscape(a))].join(" ");
   const cmd = `cd ${shellEscape(options.worktreePath)} && ${piCmd}; echo '${sentinel}'$?'__'`;
 
   sendCmuxCommand(options.surface, cmd);
@@ -1399,8 +1399,8 @@ export async function runExperimentLanes(
   const abortController = new AbortController();
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
 
-  const keepDebugPanes = process.env.PI_AB_KEEP_PANES === "1";
-  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? debugUiOf(experiment) ?? "none").toLowerCase();
+  const keepDebugPanes = process.env.PI_LAB_KEEP_PANES === "1";
+  const debugUiMode = (process.env.PI_LAB_DEBUG_UI ?? debugUiOf(experiment) ?? "none").toLowerCase();
   const requestedLaneHarness = resolveLaneHarness(executionStrategyOf(experiment));
 
   let useCmuxDebug =
@@ -1415,13 +1415,13 @@ export async function runExperimentLanes(
         const lane = experiment.lanes[i];
         const surface =
           i === 0
-            ? createCmuxSurface(`AB Lane ${lane.id}`, "right")
-            : createCmuxSurface(`AB Lane ${lane.id}`, "down", laneSurfaces[i - 1]);
+            ? createCmuxSurface(`Lab Lane ${lane.id}`, "right")
+            : createCmuxSurface(`Lab Lane ${lane.id}`, "down", laneSurfaces[i - 1]);
         laneSurfaces.push(surface);
       }
     } catch {
       try {
-        closeCmuxSurfacesByTitlePrefix("AB Lane ");
+        closeCmuxSurfacesByTitlePrefix("Lab Lane ");
       } catch {}
       useCmuxDebug = false;
       laneSurfaces.length = 0;
@@ -1587,8 +1587,8 @@ export async function runExperimentLanes(
         ];
 
         // Keep lane panes human-readable by default.
-        // Opt-in JSON event streaming with PI_AB_DEBUG_JSON=1 when needed.
-        if (process.env.PI_AB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
+        // Opt-in JSON event streaming with PI_LAB_DEBUG_JSON=1 when needed.
+        if (process.env.PI_LAB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
           piArgs.push("--mode", "json");
         }
 
@@ -1709,7 +1709,7 @@ export async function runExperimentLanes(
           closeCmuxSurface(surface);
         } catch {
           try {
-            const reboundSurface = findCmuxSurfaceByTitle(`AB Lane ${lane.id}`);
+            const reboundSurface = findCmuxSurfaceByTitle(`Lab Lane ${lane.id}`);
             if (reboundSurface) closeCmuxSurface(reboundSurface);
           } catch {}
         }
@@ -1728,10 +1728,10 @@ export async function runExperimentLanes(
   try {
     const results = await Promise.all(trackedLanePromises);
 
-    // Final sweep: close any orphaned AB lane panes that survived per-lane finally blocks.
+    // Final sweep: close any orphaned lab lane panes that survived per-lane finally blocks.
     if (useCmuxDebug && !keepDebugPanes) {
       try {
-        closeCmuxSurfacesByTitlePrefix("AB Lane ");
+        closeCmuxSurfacesByTitlePrefix("Lab Lane ");
       } catch {}
     }
 
@@ -1763,8 +1763,8 @@ export async function runExperimentLanesFixedArgsTool(
   const abortController = new AbortController();
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
 
-  const keepDebugPanes = process.env.PI_AB_KEEP_PANES === "1";
-  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? debugUiOf(experiment) ?? "none").toLowerCase();
+  const keepDebugPanes = process.env.PI_LAB_KEEP_PANES === "1";
+  const debugUiMode = (process.env.PI_LAB_DEBUG_UI ?? debugUiOf(experiment) ?? "none").toLowerCase();
   const requestedLaneHarness = resolveLaneHarness(executionStrategyOf(experiment));
 
   let useCmuxDebug =
@@ -1780,13 +1780,13 @@ export async function runExperimentLanesFixedArgsTool(
         const lane = experiment.lanes[i];
         const surface =
           i === 0
-            ? createCmuxSurface(`AB Lane ${lane.id}`, "right")
-            : createCmuxSurface(`AB Lane ${lane.id}`, "down", laneSurfaces[i - 1]);
+            ? createCmuxSurface(`Lab Lane ${lane.id}`, "right")
+            : createCmuxSurface(`Lab Lane ${lane.id}`, "down", laneSurfaces[i - 1]);
         laneSurfaces.push(surface);
       }
     } catch {
       try {
-        closeCmuxSurfacesByTitlePrefix("AB Lane ");
+        closeCmuxSurfacesByTitlePrefix("Lab Lane ");
       } catch {}
       useCmuxDebug = false;
       laneSurfaces.length = 0;
@@ -1968,7 +1968,7 @@ export async function runExperimentLanesFixedArgsTool(
           "--no-themes",
         ];
 
-        if (process.env.PI_AB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
+        if (process.env.PI_LAB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
           piArgs.push("--mode", "json");
         }
 
@@ -2091,7 +2091,7 @@ export async function runExperimentLanesFixedArgsTool(
           closeCmuxSurface(surface);
         } catch {
           try {
-            const reboundSurface = findCmuxSurfaceByTitle(`AB Lane ${lane.id}`);
+            const reboundSurface = findCmuxSurfaceByTitle(`Lab Lane ${lane.id}`);
             if (reboundSurface) closeCmuxSurface(reboundSurface);
           } catch {}
         }
@@ -2111,7 +2111,7 @@ export async function runExperimentLanesFixedArgsTool(
     const records = await Promise.all(trackedLanePromises);
     if (useCmuxDebug && !keepDebugPanes) {
       try {
-        closeCmuxSurfacesByTitlePrefix("AB Lane ");
+        closeCmuxSurfacesByTitlePrefix("Lab Lane ");
       } catch {}
     }
 
@@ -2154,8 +2154,8 @@ export async function runExperimentLanesSingleCall(
   const abortController = new AbortController();
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
 
-  const keepDebugPanes = process.env.PI_AB_KEEP_PANES === "1";
-  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? debugUiOf(experiment) ?? "none").toLowerCase();
+  const keepDebugPanes = process.env.PI_LAB_KEEP_PANES === "1";
+  const debugUiMode = (process.env.PI_LAB_DEBUG_UI ?? debugUiOf(experiment) ?? "none").toLowerCase();
   const useCmuxDebug = debugEnabledOf(experiment) && debugUiMode !== "none" && isCmuxAvailable();
 
   const laneSurfaces: Array<string | undefined> = [];
@@ -2165,13 +2165,13 @@ export async function runExperimentLanesSingleCall(
         const lane = experiment.lanes[i];
         const surface =
           i === 0
-            ? createCmuxSurface(`AB Lane ${lane.id}`, "right")
-            : createCmuxSurface(`AB Lane ${lane.id}`, "down", laneSurfaces[i - 1]);
+            ? createCmuxSurface(`Lab Lane ${lane.id}`, "right")
+            : createCmuxSurface(`Lab Lane ${lane.id}`, "down", laneSurfaces[i - 1]);
         laneSurfaces.push(surface);
       }
     } catch {
       try {
-        closeCmuxSurfacesByTitlePrefix("AB Lane ");
+        closeCmuxSurfacesByTitlePrefix("Lab Lane ");
       } catch {}
       laneSurfaces.length = 0;
     }
@@ -2293,7 +2293,7 @@ export async function runExperimentLanesSingleCall(
       ];
       appendLaneModelArg(piArgs, lane, inheritedModel);
 
-      if (process.env.PI_AB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
+      if (process.env.PI_LAB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
         piArgs.push("--mode", "json");
       }
 
@@ -2391,7 +2391,7 @@ export async function runExperimentLanesSingleCall(
           closeCmuxSurface(surface);
         } catch {
           try {
-            const reboundSurface = findCmuxSurfaceByTitle(`AB Lane ${lane.id}`);
+            const reboundSurface = findCmuxSurfaceByTitle(`Lab Lane ${lane.id}`);
             if (reboundSurface) closeCmuxSurface(reboundSurface);
           } catch {}
         }
@@ -2411,7 +2411,7 @@ export async function runExperimentLanesSingleCall(
     const records = await Promise.all(trackedLanePromises);
     if (useCmuxDebug && !keepDebugPanes) {
       try {
-        closeCmuxSurfacesByTitlePrefix("AB Lane ");
+        closeCmuxSurfacesByTitlePrefix("Lab Lane ");
       } catch {}
     }
 
@@ -2454,8 +2454,8 @@ export async function runExperimentLanesMultiCall(
   const abortController = new AbortController();
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
 
-  const keepDebugPanes = process.env.PI_AB_KEEP_PANES === "1";
-  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? debugUiOf(experiment) ?? "none").toLowerCase();
+  const keepDebugPanes = process.env.PI_LAB_KEEP_PANES === "1";
+  const debugUiMode = (process.env.PI_LAB_DEBUG_UI ?? debugUiOf(experiment) ?? "none").toLowerCase();
   const useCmuxDebug = debugEnabledOf(experiment) && debugUiMode !== "none" && isCmuxAvailable();
 
   const laneSurfaces: Array<string | undefined> = [];
@@ -2465,13 +2465,13 @@ export async function runExperimentLanesMultiCall(
         const lane = experiment.lanes[i];
         const surface =
           i === 0
-            ? createCmuxSurface(`AB Lane ${lane.id}`, "right")
-            : createCmuxSurface(`AB Lane ${lane.id}`, "down", laneSurfaces[i - 1]);
+            ? createCmuxSurface(`Lab Lane ${lane.id}`, "right")
+            : createCmuxSurface(`Lab Lane ${lane.id}`, "down", laneSurfaces[i - 1]);
         laneSurfaces.push(surface);
       }
     } catch {
       try {
-        closeCmuxSurfacesByTitlePrefix("AB Lane ");
+        closeCmuxSurfacesByTitlePrefix("Lab Lane ");
       } catch {}
       laneSurfaces.length = 0;
     }
@@ -2567,7 +2567,7 @@ export async function runExperimentLanesMultiCall(
       ];
       appendLaneModelArg(piArgs, lane, inheritedModel);
 
-      if (process.env.PI_AB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
+      if (process.env.PI_LAB_DEBUG_JSON === "1" && debugEnabledOf(experiment) && laneSurfaces[laneIndex]) {
         piArgs.push("--mode", "json");
       }
 
@@ -2657,7 +2657,7 @@ export async function runExperimentLanesMultiCall(
           closeCmuxSurface(surface);
         } catch {
           try {
-            const reboundSurface = findCmuxSurfaceByTitle(`AB Lane ${lane.id}`);
+            const reboundSurface = findCmuxSurfaceByTitle(`Lab Lane ${lane.id}`);
             if (reboundSurface) closeCmuxSurface(reboundSurface);
           } catch {}
         }
@@ -2677,7 +2677,7 @@ export async function runExperimentLanesMultiCall(
     const results = await Promise.all(trackedLanePromises);
     if (useCmuxDebug && !keepDebugPanes) {
       try {
-        closeCmuxSurfacesByTitlePrefix("AB Lane ");
+        closeCmuxSurfacesByTitlePrefix("Lab Lane ");
       } catch {}
     }
     return results;

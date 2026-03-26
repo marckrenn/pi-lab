@@ -219,17 +219,17 @@ async function runGraderPi(
       cwd: options.cwd,
       timeoutMs: options.timeoutMs,
       signal: options.signal,
-      env: { ...process.env, PI_AB_GRADER: "1" },
+      env: { ...process.env, PI_LAB_GRADER: "1" },
     });
     return { stdout: res.stdout, stderr: res.stderr, code: res.code, timedOut: res.timedOut };
   }
 
-  const surface = createCmuxSurface("AB Grader", "right");
-  const keepDebugPanes = process.env.PI_AB_KEEP_PANES === "1";
+  const surface = createCmuxSurface("Lab Grader", "right");
+  const keepDebugPanes = process.env.PI_LAB_KEEP_PANES === "1";
 
   try {
-    const sentinel = "__PI_AB_GRADER_DONE_";
-    const piCmd = ["PI_AB_GRADER=1", "pi", ...argsPi.map((a) => shellEscape(a))].join(" ");
+    const sentinel = "__PI_LAB_GRADER_DONE_";
+    const piCmd = ["PI_LAB_GRADER=1", "pi", ...argsPi.map((a) => shellEscape(a))].join(" ");
     const cmd = `cd ${shellEscape(options.cwd)} && ${piCmd}; echo '${sentinel}'$?'__'`;
 
     sendCmuxCommand(surface, cmd);
@@ -247,14 +247,14 @@ async function runGraderPi(
         closeCmuxSurface(surface);
       } catch {
         try {
-          const reboundSurface = findCmuxSurfaceByTitle("AB Grader");
+          const reboundSurface = findCmuxSurfaceByTitle("Lab Grader");
           if (reboundSurface) closeCmuxSurface(reboundSurface);
         } catch {}
       }
 
       // Final sweep: close any orphaned grader pane.
       try {
-        closeCmuxSurfacesByTitlePrefix("AB Grader");
+        closeCmuxSurfacesByTitlePrefix("Lab Grader");
       } catch {}
     }
   }
@@ -308,7 +308,7 @@ export async function runGradingProcess(
     argsPiBase.push("--model", model);
   }
 
-  const debugUiMode = (process.env.PI_AB_DEBUG_UI ?? debugUiOf(loaded.experiment) ?? "none").toLowerCase();
+  const debugUiMode = (process.env.PI_LAB_DEBUG_UI ?? debugUiOf(loaded.experiment) ?? "none").toLowerCase();
 
   let attempt = 1;
   let lastSchemaError: string | undefined;

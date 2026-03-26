@@ -28,7 +28,7 @@ describe("config strategy canonicalization", () => {
 
 describe("config loading", () => {
   test("supports extra experiment dirs with project override precedence", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "ab-config-extra-"));
+    const cwd = mkdtempSync(join(tmpdir(), "lab-config-extra-"));
     const projectDir = join(cwd, ".pi", "lab", "experiments");
     const packageDir = join(cwd, "pkg-experiments");
     const packageOverrideDir = join(cwd, "pkg-override");
@@ -71,14 +71,11 @@ describe("config loading", () => {
     expect(experiments.some((ex) => ex.experiment.id === "shadow")).toBe(true);
   });
 
-  test("loads project experiments from .pi/lab/experiments and lets them override legacy .pi/ab/experiments", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "ab-config-local-lab-"));
-    const legacyDir = join(cwd, ".pi", "ab", "experiments");
+  test("loads project experiments from .pi/lab/experiments", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "lab-config-local-"));
     const labDir = join(cwd, ".pi", "lab", "experiments");
-    mkdirSync(legacyDir, { recursive: true });
     mkdirSync(labDir, { recursive: true });
 
-    writeFileSync(join(legacyDir, "legacy.json"), JSON.stringify(mkExp("shared", "edit")));
     writeFileSync(
       join(labDir, "local.json"),
       JSON.stringify({
@@ -95,7 +92,7 @@ describe("config loading", () => {
   });
 
   test("can toggle experiment enabled state in-place", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "ab-config-toggle-"));
+    const cwd = mkdtempSync(join(tmpdir(), "lab-config-toggle-"));
     const dir = join(cwd, ".pi", "lab", "experiments");
     mkdirSync(dir, { recursive: true });
     const path = join(dir, "toggle.json");
@@ -157,8 +154,8 @@ describe("config loading", () => {
   });
 
   test("loads optional lane model overrides", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "ab-config-model-"));
-    const dir = join(cwd, ".pi", "ab", "experiments");
+    const cwd = mkdtempSync(join(tmpdir(), "lab-config-model-"));
+    const dir = join(cwd, ".pi", "lab", "experiments");
     mkdirSync(dir, { recursive: true });
 
     writeFileSync(
@@ -179,8 +176,8 @@ describe("config loading", () => {
   });
 
   test("rejects legacy fields after load normalization", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "ab-config-"));
-    const dir = join(cwd, ".pi", "ab", "experiments");
+    const cwd = mkdtempSync(join(tmpdir(), "lab-config-"));
+    const dir = join(cwd, ".pi", "lab", "experiments");
     mkdirSync(dir, { recursive: true });
 
     writeFileSync(

@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import type { AbExperiment, LaneRunRecord } from "./types.ts";
+import type { LabExperiment, LaneRunRecord } from "./types.ts";
 import { getGlobalLabDir, getProjectLabDir } from "./config.ts";
 
 export interface RunContext {
@@ -59,7 +59,7 @@ export function createRunContext(cwd: string, source: string = "project"): RunCo
 
 export function writeRunManifest(
   run: RunContext,
-  experiment: AbExperiment,
+  experiment: LabExperiment,
   payload: Record<string, unknown>,
 ): void {
   const path = join(run.dir, "run.json");
