@@ -43,7 +43,6 @@
     "index.ts",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md",
     "pi-extension/ab/**"
   ]
 }
