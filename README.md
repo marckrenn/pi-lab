@@ -8,7 +8,7 @@
 > `pi-lab` is still an **experimental alpha**. Config shape, telemetry shape, and runtime behavior may still change before `v1`.
 
 > [!NOTE]
-> If `pi-lab` is useful to you, I'd be grateful for feedback, code, docs help, or GitHub Sponsors: <https://github.com/sponsors/marckrenn>
+> If `pi-lab` is useful to you, I'd be grateful for feedback, code, docs help, or sponsoring via:
 >
 > [![GitHub Sponsors](https://img.shields.io/badge/GitHub-Sponsors-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/marckrenn)
 > [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/marckrenn)
