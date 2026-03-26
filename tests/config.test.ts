@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
-import { canonicalExecutionStrategy, deactivateBuiltinToolsOf, loadExperiments, setExperimentEnabled, validateExperimentConfig } from "../pi-extension/lab/config.ts";
+import { canonicalExecutionStrategy, deactivateBuiltinToolsOf, loadExperiments, resolveConfiguredPath, setExperimentEnabled, validateExperimentConfig } from "../pi-extension/lab/config.ts";
 
 function mkExp(id: string, tool: string, winner: string = "formula") {
   return {
@@ -71,10 +71,12 @@ describe("config loading", () => {
     expect(experiments.some((ex) => ex.experiment.id === "shadow")).toBe(true);
   });
 
-  test("loads project experiments from .pi/lab/experiments", () => {
+  test("loads project experiments from both flat json files and experiment directories", () => {
     const cwd = mkdtempSync(join(tmpdir(), "lab-config-local-"));
     const labDir = join(cwd, ".pi", "lab", "experiments");
+    const nestedDir = join(labDir, "nested-exp");
     mkdirSync(labDir, { recursive: true });
+    mkdirSync(nestedDir, { recursive: true });
 
     writeFileSync(
       join(labDir, "local.json"),
@@ -83,12 +85,37 @@ describe("config loading", () => {
         winner: { mode: "blend" },
       }),
     );
+    writeFileSync(join(nestedDir, "experiment.json"), JSON.stringify(mkExp("nested", "planner")));
 
     const experiments = loadExperiments(cwd);
-    expect(experiments).toHaveLength(1);
-    expect(experiments[0]?.source).toBe("project");
-    expect(experiments[0]?.path).toBe(join(labDir, "local.json"));
-    expect(experiments[0]?.experiment.tool.name).toBe("edit_compare");
+    expect(experiments).toHaveLength(2);
+    const byId = new Map(experiments.map((experiment) => [experiment.experiment.id, experiment]));
+    expect(byId.get("shared")?.source).toBe("project");
+    expect(byId.get("shared")?.path).toBe(join(labDir, "local.json"));
+    expect(byId.get("shared")?.experiment.tool.name).toBe("edit_compare");
+    expect(byId.get("nested")?.source).toBe("project");
+    expect(byId.get("nested")?.path).toBe(join(nestedDir, "experiment.json"));
+    expect(byId.get("nested")?.experiment.tool.name).toBe("planner");
+  });
+
+  test("loads legacy project experiments from .pi/ab/experiments with project override precedence", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "lab-config-legacy-"));
+    const legacyDir = join(cwd, ".pi", "ab", "experiments");
+    const projectDir = join(cwd, ".pi", "lab", "experiments");
+    mkdirSync(legacyDir, { recursive: true });
+    mkdirSync(projectDir, { recursive: true });
+
+    writeFileSync(join(legacyDir, "legacy.json"), JSON.stringify(mkExp("legacy-only", "edit")));
+    writeFileSync(join(legacyDir, "shared.json"), JSON.stringify(mkExp("shared", "write")));
+    writeFileSync(join(projectDir, "shared.json"), JSON.stringify(mkExp("shared", "edit")));
+
+    const experiments = loadExperiments(cwd);
+    const byId = new Map(experiments.map((experiment) => [experiment.experiment.id, experiment]));
+
+    expect(byId.get("legacy-only")?.source).toBe("legacy-project");
+    expect(byId.get("legacy-only")?.path).toBe(join(legacyDir, "legacy.json"));
+    expect(byId.get("shared")?.source).toBe("project");
+    expect(byId.get("shared")?.experiment.tool.name).toBe("edit");
   });
 
   test("can toggle experiment enabled state in-place", () => {
@@ -182,6 +209,18 @@ describe("config loading", () => {
     } as any);
 
     expect(result.errors.some((e) => e.includes("valid regular expression"))).toBe(true);
+  });
+
+  test("prefers config-relative paths over cwd-relative paths", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "lab-config-paths-"));
+    const configDir = join(cwd, ".pi", "lab", "experiments", "nested-exp");
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(join(cwd, "lanes"), { recursive: true });
+    mkdirSync(join(configDir, "lanes"), { recursive: true });
+    writeFileSync(join(cwd, "lanes", "a.ts"), "// cwd", "utf8");
+    writeFileSync(join(configDir, "lanes", "a.ts"), "// config", "utf8");
+
+    expect(resolveConfiguredPath("./lanes/a.ts", cwd, join(configDir, "experiment.json"))).toBe(join(configDir, "lanes", "a.ts"));
   });
 
   test("loads optional lane model and thinking overrides", () => {

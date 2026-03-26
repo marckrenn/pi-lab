@@ -9,6 +9,8 @@ export interface RunContext {
   project: string;
   projectDir: string;
   scope: "local" | "global";
+  experimentId?: string;
+  experimentDir?: string;
 }
 
 function nowStamp(): string {
@@ -23,8 +25,17 @@ function projectRunsLogPath(run: RunContext): string {
   return join(run.projectDir, "runs.jsonl");
 }
 
+function experimentRunsLogPath(run: RunContext): string | undefined {
+  return run.experimentDir ? join(run.experimentDir, "runs.jsonl") : undefined;
+}
+
 function appendProjectRunEvent(run: RunContext, entry: Record<string, unknown>): void {
-  appendFileSync(projectRunsLogPath(run), `${JSON.stringify(entry)}\n`, "utf8");
+  const serialized = `${JSON.stringify(entry)}\n`;
+  appendFileSync(projectRunsLogPath(run), serialized, "utf8");
+
+  const experimentLog = experimentRunsLogPath(run);
+  if (!experimentLog) return;
+  appendFileSync(experimentLog, serialized, "utf8");
 }
 
 function currentLaneRecords(run: RunContext): LaneRunRecord[] {
@@ -45,16 +56,29 @@ function currentLaneRecords(run: RunContext): LaneRunRecord[] {
   }
 }
 
-export function createRunContext(cwd: string, source: string = "project"): RunContext {
+function experimentPathSegment(experimentId?: string): string | undefined {
+  const trimmed = experimentId?.trim();
+  if (!trimmed) return undefined;
+  return trimmed.replace(/[\\/]+/g, "-");
+}
+
+export function createRunContext(cwd: string, experimentId?: string, source: string = "project"): RunContext {
+  const normalizedSource = (experimentId === "project" || experimentId === "global") && source === "project"
+    ? experimentId
+    : source;
+  const normalizedExperimentId = normalizedSource === experimentId ? undefined : experimentId;
   const project = basename(cwd);
   const runId = `${nowStamp()}-${rand4()}`;
-  const scope: "local" | "global" = source === "global" ? "global" : "local";
+  const scope: "local" | "global" = normalizedSource === "global" ? "global" : "local";
   const projectDir = scope === "local" ? getProjectLabDir(cwd) : join(getGlobalLabDir(), project);
-  const dir = join(projectDir, runId);
+  const experimentSegment = experimentPathSegment(normalizedExperimentId);
+  const experimentDir = experimentSegment ? join(projectDir, "experiments", experimentSegment) : undefined;
+  const runsDir = experimentDir ? join(experimentDir, "runs") : projectDir;
+  const dir = join(runsDir, runId);
   mkdirSync(dir, { recursive: true });
   mkdirSync(join(dir, "lanes"), { recursive: true });
   mkdirSync(join(dir, "artifacts"), { recursive: true });
-  return { runId, dir, project, projectDir, scope };
+  return { runId, dir, project, projectDir, scope, experimentId: experimentSegment, experimentDir };
 }
 
 export function writeRunManifest(

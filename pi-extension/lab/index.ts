@@ -887,7 +887,7 @@ async function runFixedArgsToolExperiment(
   const experiment = loaded.experiment;
   cooldownState.set(experiment.id, now);
 
-  const run = createRunContext(ctx.cwd, loaded.source);
+  const run = createRunContext(ctx.cwd, experiment.id, loaded.source);
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
@@ -1101,7 +1101,7 @@ async function runSingleCallFlowExperiment(
   const experiment = loaded.experiment;
   cooldownState.set(experiment.id, now);
 
-  const run = createRunContext(ctx.cwd, loaded.source);
+  const run = createRunContext(ctx.cwd, experiment.id, loaded.source);
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
@@ -1281,7 +1281,7 @@ async function runMultiCallFlowExperiment(
   const experiment = loaded.experiment;
   cooldownState.set(experiment.id, now);
 
-  const run = createRunContext(ctx.cwd, loaded.source);
+  const run = createRunContext(ctx.cwd, experiment.id, loaded.source);
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
@@ -1478,7 +1478,7 @@ function formatExperimentEnabledBadge(loaded: { experiment: { enabled?: boolean 
 }
 
 function formatExperimentListLine(loaded: ReturnType<typeof loadExperiments>[number]): string {
-  const toggleHint = loaded.source === "project" || loaded.source === "global" ? "toggleable" : "read-only";
+  const toggleHint = loaded.source === "project" || loaded.source === "global" || loaded.source === "legacy-project" ? "toggleable" : "read-only";
   return `• [${formatExperimentEnabledBadge(loaded)}] ${formatExperimentSummary(loaded)} · ${toggleHint}`;
 }
 
@@ -1507,7 +1507,7 @@ function experimentUiDescription(loaded: ReturnType<typeof loadExperiments>[numb
 async function showExistingExperimentsManager(ctx: any, experimentDirs?: string[]) {
   const experiments = loadExperiments(ctx.cwd, { experimentDirs });
   if (experiments.length === 0) {
-    ctx.ui.notify("No lab experiments found (global or project).", "warning");
+    ctx.ui.notify("No lab experiments found (global, project, or legacy project).", "warning");
     return;
   }
 
@@ -1517,7 +1517,7 @@ async function showExistingExperimentsManager(ctx: any, experimentDirs?: string[
     container.addChild(new Spacer(1));
 
     const items: SettingItem[] = experiments.map((loaded) => {
-      const toggleable = loaded.source === "project" || loaded.source === "global";
+      const toggleable = loaded.source === "project" || loaded.source === "global" || loaded.source === "legacy-project";
       return {
         id: loaded.experiment.id,
         label: `${loaded.experiment.id} [${experimentSourceLabel(loaded.source)}]`,
@@ -1533,7 +1533,7 @@ async function showExistingExperimentsManager(ctx: any, experimentDirs?: string[
       getSettingsListTheme(),
       (id, newValue) => {
         const target = experiments.find((e) => e.experiment.id === id);
-        if (!target || (target.source !== "project" && target.source !== "global")) {
+        if (!target || (target.source !== "project" && target.source !== "global" && target.source !== "legacy-project")) {
           ctx.ui.notify(`Experiment '${id}' is read-only.`, "warning");
           return;
         }
@@ -1598,14 +1598,14 @@ type LabRunSummary = {
   error?: string;
 };
 
-function readRunSummary(scope: "local" | "global", dir: string, runId: string): LabRunSummary | null {
+function readRunSummary(scope: "local" | "global", dir: string, runId: string, inferredExperimentId?: string): LabRunSummary | null {
   try {
     const manifest = JSON.parse(readFileSync(join(dir, "run.json"), "utf8"));
     return {
       scope,
       runId,
       dir,
-      experimentId: manifest?.experiment_id,
+      experimentId: manifest?.experiment_id ?? inferredExperimentId,
       timestamp: manifest?.timestamp,
       stage: manifest?.stage,
       winnerLaneId: manifest?.winner_lane_id,
@@ -1619,6 +1619,31 @@ function readRunSummary(scope: "local" | "global", dir: string, runId: string): 
   }
 }
 
+function collectScopedRunDirs(rootDir: string): Array<{ dir: string; runId: string; experimentId?: string }> {
+  const runs: Array<{ dir: string; runId: string; experimentId?: string }> = [];
+  if (!existsSync(rootDir)) return runs;
+
+  for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === "experiments") continue;
+    runs.push({ dir: join(rootDir, entry.name), runId: entry.name });
+  }
+
+  const experimentsDir = join(rootDir, "experiments");
+  if (!existsSync(experimentsDir)) return runs;
+
+  for (const experimentEntry of readdirSync(experimentsDir, { withFileTypes: true })) {
+    if (!experimentEntry.isDirectory()) continue;
+    const runsDir = join(experimentsDir, experimentEntry.name, "runs");
+    if (!existsSync(runsDir)) continue;
+    for (const runEntry of readdirSync(runsDir, { withFileTypes: true })) {
+      if (!runEntry.isDirectory()) continue;
+      runs.push({ dir: join(runsDir, runEntry.name), runId: runEntry.name, experimentId: experimentEntry.name });
+    }
+  }
+
+  return runs;
+}
+
 function loadRunSummaries(cwd: string): LabRunSummary[] {
   const projectName = basename(cwd);
   const scopedDirs: Array<{ scope: "local" | "global"; dir: string }> = [
@@ -1628,10 +1653,8 @@ function loadRunSummaries(cwd: string): LabRunSummary[] {
 
   const runs: LabRunSummary[] = [];
   for (const scoped of scopedDirs) {
-    if (!existsSync(scoped.dir)) continue;
-    for (const entry of readdirSync(scoped.dir, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name === "experiments") continue;
-      const summary = readRunSummary(scoped.scope, join(scoped.dir, entry.name), entry.name);
+    for (const run of collectScopedRunDirs(scoped.dir)) {
+      const summary = readRunSummary(scoped.scope, run.dir, run.runId, run.experimentId);
       if (summary) runs.push(summary);
     }
   }
@@ -1796,7 +1819,7 @@ function buildLabCreateKickoff(pi: ExtensionAPI, ctx: any, initialTargets?: stri
     "- explain what you created and how to run or inspect it afterward",
     "",
     "Defaults to prefer unless I say otherwise:",
-    "- prefer project-local experiments in .pi/lab/experiments/*.json",
+    "- prefer project-local experiments in .pi/lab/experiments/<experiment-id>/experiment.json with sibling lanes/tools/runs inside that experiment directory",
     "- keep one clear baseline/fallback lane",
     "- for builtin targets, default to additive mode rather than replacing the builtin tool name unless I explicitly ask for transparent replacement",
     "- when builtin replacement is explicitly requested because the replacement should feel like normal usage, prefer the builtin name itself",
@@ -2044,7 +2067,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
           const experiment = loaded.experiment;
           cooldownState.set(experiment.id, now);
 
-          const run = createRunContext(execCtx.cwd, loaded.source);
+          const run = createRunContext(execCtx.cwd, experiment.id, loaded.source);
           writeRunManifest(run, experiment, {
             source: loaded.source,
             config_path: loaded.path,
@@ -2287,7 +2310,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
       if (cmd === "status" || cmd === "validate") {
         const experiments = loadExperiments(ctx.cwd, { experimentDirs });
         if (experiments.length === 0) {
-          ctx.ui.notify("No lab experiments found (global or project).", "warning");
+          ctx.ui.notify("No lab experiments found (global, project, or legacy project).", "warning");
           return;
         }
 
@@ -2318,17 +2341,20 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
         const rest = cmd.slice("experiments".length).trim();
 
         if (experiments.length === 0) {
-          ctx.ui.notify("No lab experiments found (global or project).", "warning");
+          ctx.ui.notify("No lab experiments found (global, project, or legacy project).", "warning");
           return;
         }
 
         if (!rest || rest === "list") {
           const local = experiments.filter((e) => e.source === "project");
+          const legacyLocal = experiments.filter((e) => e.source === "legacy-project");
           const global = experiments.filter((e) => e.source === "global");
-          const other = experiments.filter((e) => e.source !== "project" && e.source !== "global");
+          const other = experiments.filter((e) => e.source !== "project" && e.source !== "global" && e.source !== "legacy-project");
           const lines: string[] = [];
           lines.push("Local experiments:");
           lines.push(...(local.length > 0 ? local.map(formatExperimentListLine) : ["• none"]));
+          lines.push("", "Legacy local experiments:");
+          lines.push(...(legacyLocal.length > 0 ? legacyLocal.map(formatExperimentListLine) : ["• none"]));
           lines.push("", "Global experiments:");
           lines.push(...(global.length > 0 ? global.map(formatExperimentListLine) : ["• none"]));
           if (other.length > 0) {
@@ -2353,7 +2379,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
           ctx.ui.notify(`Experiment '${experimentId}' not found.`, "warning");
           return;
         }
-        if (target.source !== "project" && target.source !== "global") {
+        if (target.source !== "project" && target.source !== "global" && target.source !== "legacy-project") {
           ctx.ui.notify(`Experiment '${experimentId}' comes from ${target.source} and is read-only here.`, "warning");
           return;
         }

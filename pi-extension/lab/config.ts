@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { Dirent, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type {
@@ -139,11 +139,36 @@ function readExperimentFile(path: string): LabExperiment[] {
   return [normalizeExperiment(parsed)];
 }
 
-function listExperimentFiles(dir: string): string[] {
+function listExperimentJsonFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
     .filter((f) => f.endsWith(".json"))
     .map((f) => join(dir, f));
+}
+
+function listExperimentDirectoryEntries(dir: string): Dirent[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+}
+
+function listExperimentFiles(dir: string): string[] {
+  const seen = new Set<string>();
+  const files: string[] = [];
+
+  for (const path of listExperimentJsonFiles(dir)) {
+    if (seen.has(path)) continue;
+    seen.add(path);
+    files.push(path);
+  }
+
+  for (const entry of listExperimentDirectoryEntries(dir)) {
+    const path = join(dir, entry.name, "experiment.json");
+    if (!existsSync(path) || seen.has(path)) continue;
+    seen.add(path);
+    files.push(path);
+  }
+
+  return files;
 }
 
 function normalizeExperimentDir(rawDir: string): string {
@@ -182,6 +207,10 @@ export function getGlobalExperimentsDir(): string {
 
 export function getProjectExperimentsDir(cwd: string): string {
   return join(getProjectLabDir(cwd), "experiments");
+}
+
+export function getLegacyProjectExperimentsDir(cwd: string): string {
+  return join(cwd, ".pi", "ab", "experiments");
 }
 
 export function toolNameOf(experiment: LabExperiment): string {
@@ -234,62 +263,40 @@ export function getHardcodedWinnerLaneId(experiment: LabExperiment): string {
   return experiment.winner?.hardcoded_lane ?? getBaselineLaneId(experiment);
 }
 
+function mergeExperimentFiles(merged: Map<string, LoadedExperiment>, source: string, files: string[]): void {
+  for (const path of files) {
+    try {
+      for (const experiment of readExperimentFile(path)) {
+        if (!experiment?.id) continue;
+        merged.set(experiment.id, {
+          source,
+          path,
+          experiment,
+          validation: validateExperimentConfig(experiment, path),
+        });
+      }
+    } catch {
+      // skip malformed/unavailable config file and continue loading others
+    }
+  }
+}
+
 export function loadExperiments(cwd: string, options?: ExperimentLoadOptions): LoadedExperiment[] {
   const globalFiles = listExperimentFiles(getGlobalExperimentsDir());
+  const legacyProjectFiles = listExperimentFiles(getLegacyProjectExperimentsDir(cwd));
   const projectFiles = listExperimentFiles(getProjectExperimentsDir(cwd));
   const packageSources = collectExtraExperimentFiles(cwd, options?.experimentDirs);
 
   const merged = new Map<string, LoadedExperiment>();
 
-  for (const path of globalFiles) {
-    try {
-      for (const experiment of readExperimentFile(path)) {
-        if (!experiment?.id) continue;
-        merged.set(experiment.id, {
-          source: "global",
-          path,
-          experiment,
-          validation: validateExperimentConfig(experiment, path),
-        });
-      }
-    } catch {
-      // skip malformed/unavailable config file and continue loading others
-    }
-  }
+  mergeExperimentFiles(merged, "global", globalFiles);
+  mergeExperimentFiles(merged, "legacy-project", legacyProjectFiles);
 
   for (const source of packageSources) {
-    for (const path of listExperimentFiles(source.path)) {
-      try {
-        for (const experiment of readExperimentFile(path)) {
-          if (!experiment?.id) continue;
-          merged.set(experiment.id, {
-            source: source.source,
-            path,
-            experiment,
-            validation: validateExperimentConfig(experiment, path),
-          });
-        }
-      } catch {
-        // skip malformed/unavailable config file and continue loading others
-      }
-    }
+    mergeExperimentFiles(merged, source.source, listExperimentFiles(source.path));
   }
 
-  for (const path of projectFiles) {
-    try {
-      for (const experiment of readExperimentFile(path)) {
-        if (!experiment?.id) continue;
-        merged.set(experiment.id, {
-          source: "project",
-          path,
-          experiment,
-          validation: validateExperimentConfig(experiment, path),
-        });
-      }
-    } catch {
-      // skip malformed/unavailable config file and continue loading others
-    }
-  }
+  mergeExperimentFiles(merged, "project", projectFiles);
 
   return [...merged.values()];
 }
@@ -564,7 +571,10 @@ export function formatExperimentSummary(loaded: LoadedExperiment): string {
       : (loaded.validation?.warnings?.length ?? 0) > 0
         ? " [warn]"
         : "";
-  return `${ex.id} (${loaded.source}, tool=${toolNameOf(ex)}, winner=${winnerModeOf(ex)}, strategy=${strategy}, lanes=${ex.lanes.length}) from ${basename(loaded.path)}${validationBadge}`;
+  const sourcePath = basename(loaded.path) === "experiment.json"
+    ? `${basename(dirname(loaded.path))}/experiment.json`
+    : basename(loaded.path);
+  return `${ex.id} (${loaded.source}, tool=${toolNameOf(ex)}, winner=${winnerModeOf(ex)}, strategy=${strategy}, lanes=${ex.lanes.length}) from ${sourcePath}${validationBadge}`;
 }
 
 export function resolveConfiguredPath(value: string, cwd: string, configPath?: string): string {
@@ -576,11 +586,16 @@ export function resolveConfiguredPath(value: string, cwd: string, configPath?: s
     return trimmed;
   }
 
+  const base = configPath ? dirname(configPath) : cwd;
+  const configCandidate = resolve(base, trimmed);
+  if (existsSync(configCandidate)) {
+    return configCandidate;
+  }
+
   const cwdCandidate = resolve(cwd, trimmed);
   if (existsSync(cwdCandidate)) {
     return cwdCandidate;
   }
 
-  const base = configPath ? dirname(configPath) : cwd;
-  return resolve(base, trimmed);
+  return configCandidate;
 }

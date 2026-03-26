@@ -5,12 +5,16 @@
 ## Run storage locations
 
 ### Local project data
-- run directory: `.pi/lab/<run-id>/`
-- aggregate log: `.pi/lab/runs.jsonl`
+- per-experiment run directory: `.pi/lab/experiments/<experiment-id>/runs/<run-id>/`
+- per-experiment aggregate log: `.pi/lab/experiments/<experiment-id>/runs.jsonl`
+- top-level aggregate log across all local experiments: `.pi/lab/runs.jsonl`
+- legacy top-level run directories at `.pi/lab/<run-id>/` are still readable for compatibility
 
 ### Global data
-- run directory: `~/.pi/agent/lab/<project>/<run-id>/`
-- aggregate log: `~/.pi/agent/lab/<project>/runs.jsonl`
+- per-experiment run directory: `~/.pi/agent/lab/<project>/experiments/<experiment-id>/runs/<run-id>/`
+- per-experiment aggregate log: `~/.pi/agent/lab/<project>/experiments/<experiment-id>/runs.jsonl`
+- top-level aggregate log across all project runs: `~/.pi/agent/lab/<project>/runs.jsonl`
+- legacy top-level run directories at `~/.pi/agent/lab/<project>/<run-id>/` are still readable for compatibility
 
 ## Common run files
 

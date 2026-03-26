@@ -22,12 +22,12 @@ afterEach(() => {
 });
 
 describe("project run jsonl logging", () => {
-  test("appends run and lane events to project runs.jsonl", () => {
+  test("appends run and lane events to project runs.jsonl and per-experiment runs.jsonl", () => {
     const fakeHome = createTempDir("pi-lab-home-");
     const cwd = createTempDir("pi-lab-project-");
     process.env.HOME = fakeHome;
 
-    const run = createRunContext(cwd);
+    const run = createRunContext(cwd, "example-exp");
     cleanupProjectDir = run.projectDir;
     const experiment: LabExperiment = {
       id: "example-exp",
@@ -53,20 +53,27 @@ describe("project run jsonl logging", () => {
     };
     writeLaneRecords(run, [lane]);
 
-    const logPath = join(run.projectDir, "runs.jsonl");
-    const lines = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(run.dir).toBe(join(run.projectDir, "experiments", "example-exp", "runs", run.runId));
 
-    expect(lines).toHaveLength(2);
-    expect(lines[0].kind).toBe("run_manifest");
-    expect(lines[0].run_id).toBe(run.runId);
-    expect(lines[0].project).toBe(run.project);
-    expect(lines[0].manifest.experiment_id).toBe("example-exp");
-    expect(lines[0].manifest.stage).toBe("started");
+    const topLevelLogPath = join(run.projectDir, "runs.jsonl");
+    const topLevelLines = readFileSync(topLevelLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 
-    expect(lines[1].kind).toBe("lane_record");
-    expect(lines[1].lane_id).toBe("baseline");
-    expect(lines[1].record.status).toBe("success");
-    expect(lines[1].record.tool_call_count).toBe(3);
-    expect(lines[1].record.custom_tool_call_count).toBe(2);
+    const experimentLogPath = join(run.projectDir, "experiments", "example-exp", "runs.jsonl");
+    const experimentLines = readFileSync(experimentLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+
+    expect(topLevelLines).toHaveLength(2);
+    expect(experimentLines).toHaveLength(2);
+    expect(topLevelLines[0].kind).toBe("run_manifest");
+    expect(topLevelLines[0].run_id).toBe(run.runId);
+    expect(topLevelLines[0].project).toBe(run.project);
+    expect(topLevelLines[0].manifest.experiment_id).toBe("example-exp");
+    expect(topLevelLines[0].manifest.stage).toBe("started");
+
+    expect(topLevelLines[1].kind).toBe("lane_record");
+    expect(topLevelLines[1].lane_id).toBe("baseline");
+    expect(topLevelLines[1].record.status).toBe("success");
+    expect(topLevelLines[1].record.tool_call_count).toBe(3);
+    expect(topLevelLines[1].record.custom_tool_call_count).toBe(2);
+    expect(experimentLines).toEqual(topLevelLines);
   });
 });

@@ -60,8 +60,8 @@ What the clanker should usually do:
 - inspect the target tool or workflow before choosing `fixed_args`, `lane_single_call`, or `lane_multi_call`
 - if the target is a builtin tool, ask whether you want a transparent same-name replacement (for example `edit`) or an explicit lab-only proxy tool name (for example `edit_experiment`)
 - when you want normal agent requests to naturally use the replacement, keep the replacement under the builtin name instead of teaching the agent a differently named proxy
-- create project-local experiment config in `.pi/lab/experiments/*.json`
-- create or wire lane files, prompts, and any companion extension needed for builtin-tool replacement, prompt guidance, or guardrails
+- create a project-local experiment directory at `.pi/lab/experiments/<experiment-id>/` with `experiment.json`, plus sibling `lanes/`, `tools/`, and `runs/` as needed
+- create or wire lane files, prompts, tool helpers, and any companion extension needed for builtin-tool replacement, prompt guidance, or guardrails
 - keep one lane as the baseline/fallback lane
 - tell you how to run and inspect the experiment
 
@@ -112,9 +112,14 @@ More details:
 
 Experiment configs are defined as JSON.
 
-Locations:
-- **project-local**: `.pi/lab/experiments/*.json`
-- **global**: `~/.pi/agent/lab/experiments/*.json`
+Canonical locations:
+- **project-local**: `.pi/lab/experiments/<experiment-id>/experiment.json`
+- **global**: `~/.pi/agent/lab/experiments/<experiment-id>/experiment.json`
+
+Compatibility locations still loaded:
+- **project-local flat files**: `.pi/lab/experiments/*.json`
+- **legacy project-local flat files**: `.pi/ab/experiments/*.json`
+- **global flat files**: `~/.pi/agent/lab/experiments/*.json`
 
 If the same experiment id exists in multiple places, project-local config wins.
 
@@ -123,12 +128,16 @@ If the same experiment id exists in multiple places, project-local config wins.
 `pi-lab` now supports both local and global run storage.
 
 ### Local project data
-- run directories: `.pi/lab/<run-id>/`
-- aggregate log: `.pi/lab/runs.jsonl`
+- per-experiment run directories: `.pi/lab/experiments/<experiment-id>/runs/<run-id>/`
+- per-experiment aggregate log: `.pi/lab/experiments/<experiment-id>/runs.jsonl`
+- top-level aggregate log across all local experiments: `.pi/lab/runs.jsonl`
+- legacy top-level run directories at `.pi/lab/<run-id>/` are still read for compatibility
 
 ### Global data
-- run directories: `~/.pi/agent/lab/<project>/<run-id>/`
-- aggregate log: `~/.pi/agent/lab/<project>/runs.jsonl`
+- per-experiment run directories: `~/.pi/agent/lab/<project>/experiments/<experiment-id>/runs/<run-id>/`
+- per-experiment aggregate log: `~/.pi/agent/lab/<project>/experiments/<experiment-id>/runs.jsonl`
+- top-level aggregate log across all project runs: `~/.pi/agent/lab/<project>/runs.jsonl`
+- legacy top-level run directories at `~/.pi/agent/lab/<project>/<run-id>/` are still read for compatibility
 
 More details:
 - [Telemetry layout](docs/telemetry.md)

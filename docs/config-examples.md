@@ -2,9 +2,27 @@
 
 Experiment configs are JSON-only.
 
-Locations:
-- project-local: `.pi/lab/experiments/*.json`
-- global: `~/.pi/agent/lab/experiments/*.json`
+Canonical locations:
+- project-local: `.pi/lab/experiments/<experiment-id>/experiment.json`
+- global: `~/.pi/agent/lab/experiments/<experiment-id>/experiment.json`
+
+Compatibility locations still loaded:
+- project-local flat files: `.pi/lab/experiments/*.json`
+- legacy project-local flat files: `.pi/ab/experiments/*.json`
+- global flat files: `~/.pi/agent/lab/experiments/*.json`
+
+Recommended project-local layout:
+
+```text
+.pi/lab/experiments/<experiment-id>/
+  experiment.json
+  lanes/
+  tools/
+  runs/
+  runs.jsonl
+```
+
+Relative paths inside `experiment.json` are resolved from the directory containing that config file first, then fall back to the project cwd for compatibility.
 
 ## Smallest valid config
 

@@ -92,6 +92,35 @@ function parseRunTimestampMs(runDir: string, runId: string): number {
   }
 }
 
+function collectRunEntries(scopeDir: string): Array<{ runId: string; path: string; ts: number }> {
+  const runEntries: Array<{ runId: string; path: string; ts: number }> = [];
+
+  try {
+    for (const entry of readdirSync(scopeDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name === "experiments") continue;
+      const runId = entry.name;
+      const path = join(scopeDir, runId);
+      runEntries.push({ runId, path, ts: parseRunTimestampMs(path, runId) });
+    }
+  } catch {}
+
+  const experimentsDir = join(scopeDir, "experiments");
+  try {
+    for (const experimentEntry of readdirSync(experimentsDir, { withFileTypes: true })) {
+      if (!experimentEntry.isDirectory()) continue;
+      const runsDir = join(experimentsDir, experimentEntry.name, "runs");
+      for (const runEntry of readdirSync(runsDir, { withFileTypes: true })) {
+        if (!runEntry.isDirectory()) continue;
+        const runId = runEntry.name;
+        const path = join(runsDir, runId);
+        runEntries.push({ runId, path, ts: parseRunTimestampMs(path, runId) });
+      }
+    }
+  } catch {}
+
+  return runEntries.sort((a, b) => b.ts - a.ts);
+}
+
 export function runLabGcCommand(args: string, cwd: string): LabGcResult {
   const parsed = parseGcOptions(args.trim());
   if (parsed.help) {
@@ -131,19 +160,7 @@ export function runLabGcCommand(args: string, cwd: string): LabGcResult {
   let scannedRuns = 0;
 
   for (const scope of projectScopes) {
-    let runEntries: Array<{ runId: string; path: string; ts: number }> = [];
-    try {
-      runEntries = readdirSync(scope.dir, { withFileTypes: true })
-        .filter((d) => d.isDirectory() && d.name !== "experiments")
-        .map((d) => {
-          const runId = d.name;
-          const path = join(scope.dir, runId);
-          return { runId, path, ts: parseRunTimestampMs(path, runId) };
-        })
-        .sort((a, b) => b.ts - a.ts);
-    } catch {
-      continue;
-    }
+    const runEntries = collectRunEntries(scope.dir);
 
     scannedRuns += runEntries.length;
     const protectedSet = new Set(runEntries.slice(0, options.keepLast).map((r) => r.runId));
