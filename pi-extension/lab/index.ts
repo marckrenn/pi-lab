@@ -854,6 +854,7 @@ async function runFixedArgsToolExperiment(
   cooldownState: Map<string, number>,
   experimentDirs: string[] | undefined,
   nativeTool: NativeToolDelegate | undefined,
+  inheritedThinking?: any,
 ) {
   const now = Date.now();
   const matched = selectExperimentForTool(ctx.cwd, toolName, params, now, cooldownState, {
@@ -908,7 +909,7 @@ async function runFixedArgsToolExperiment(
     const warning = nonGitBaselineFallbackMessage(gitRepo.error);
     ctx.ui.notify(warning, "warning");
 
-    const fallback = await runBaselineFixedArgsFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model, pi.getThinkingLevel());
+    const fallback = await runBaselineFixedArgsFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model, inheritedThinking);
     const lanes = [fallback.lane];
     writeLaneRecords(run, lanes);
     writeRunManifest(run, experiment, {
@@ -968,7 +969,7 @@ async function runFixedArgsToolExperiment(
         updateLaneWidget(ctx, laneStatusKey, experiment.id, snapshot);
       },
       ctx.model,
-      pi.getThinkingLevel(),
+      inheritedThinking,
     );
 
     const lanes = laneRun.records;
@@ -1086,6 +1087,7 @@ async function runSingleCallFlowExperiment(
   ctx: any,
   cooldownState: Map<string, number>,
   experimentDirs: string[] | undefined,
+  inheritedThinking?: any,
 ) {
   const now = Date.now();
   const loaded = selectExperimentForTool(ctx.cwd, toolName, params as Record<string, unknown>, now, cooldownState, {
@@ -1124,7 +1126,7 @@ async function runSingleCallFlowExperiment(
     const warning = nonGitBaselineFallbackMessage(gitRepo.error);
     ctx.ui.notify(warning, "warning");
 
-    const fallback = await runBaselineSingleCallFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model, pi.getThinkingLevel());
+    const fallback = await runBaselineSingleCallFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model, inheritedThinking);
     const lanes = [fallback.lane];
     writeLaneRecords(run, lanes);
     writeRunManifest(run, experiment, {
@@ -1183,7 +1185,7 @@ async function runSingleCallFlowExperiment(
         updateLaneWidget(ctx, laneStatusKey, experiment.id, snapshot);
       },
       ctx.model,
-      pi.getThinkingLevel(),
+      inheritedThinking,
     );
 
     const lanes = laneRun.records;
@@ -1266,6 +1268,7 @@ async function runMultiCallFlowExperiment(
   ctx: any,
   cooldownState: Map<string, number>,
   experimentDirs: string[] | undefined,
+  inheritedThinking?: any,
 ) {
   const now = Date.now();
   const loaded = selectExperimentForTool(ctx.cwd, toolName, params as Record<string, unknown>, now, cooldownState, {
@@ -1304,7 +1307,7 @@ async function runMultiCallFlowExperiment(
     const warning = nonGitBaselineFallbackMessage(gitRepo.error);
     ctx.ui.notify(warning, "warning");
 
-    const fallback = await runBaselineMultiCallFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model, pi.getThinkingLevel());
+    const fallback = await runBaselineMultiCallFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model, inheritedThinking);
     const lanes = [fallback.lane];
     writeLaneRecords(run, lanes);
     writeRunManifest(run, experiment, {
@@ -1363,7 +1366,7 @@ async function runMultiCallFlowExperiment(
         updateLaneWidget(ctx, laneStatusKey, experiment.id, snapshot);
       },
       ctx.model,
-      pi.getThinkingLevel(),
+      inheritedThinking,
     );
 
     writeLaneRecords(run, lanes);
@@ -1939,6 +1942,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
             cooldownState,
             experimentDirs,
             support.nativeTool,
+            pi.getThinkingLevel(),
           );
         },
         renderResult(result, options, theme) {
@@ -1970,7 +1974,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
         parameters: ReplanFlowParams,
         async execute(_toolCallId, params, signal, _onUpdate, execCtx) {
           try {
-            return await runSingleCallFlowExperiment(params, toolName, signal, execCtx, cooldownState, experimentDirs);
+            return await runSingleCallFlowExperiment(params, toolName, signal, execCtx, cooldownState, experimentDirs, pi.getThinkingLevel());
           } catch (err: any) {
             const msg = err?.message ?? String(err);
             if (!msg.includes("No active lane_single_call experiment matched tool")) {
@@ -1978,7 +1982,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
             }
           }
 
-          return runMultiCallFlowExperiment(params, toolName, signal, execCtx, cooldownState, experimentDirs);
+          return runMultiCallFlowExperiment(params, toolName, signal, execCtx, cooldownState, experimentDirs, pi.getThinkingLevel());
         },
         renderResult(result, options, theme) {
           return renderLabToolResult(result, options, theme);
@@ -2034,7 +2038,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
 
           if (isReplanFlowInput(params)) {
             try {
-              return await runSingleCallFlowExperiment(params, "edit", signal, execCtx, cooldownState, experimentDirs);
+              return await runSingleCallFlowExperiment(params, "edit", signal, execCtx, cooldownState, experimentDirs, pi.getThinkingLevel());
             } catch (err: any) {
               const msg = err?.message ?? String(err);
               if (!msg.includes("No active lane_single_call experiment matched tool 'edit'")) {
@@ -2043,7 +2047,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
             }
 
             try {
-              return await runMultiCallFlowExperiment(params, "edit", signal, execCtx, cooldownState, experimentDirs);
+              return await runMultiCallFlowExperiment(params, "edit", signal, execCtx, cooldownState, experimentDirs, pi.getThinkingLevel());
             } catch (err: any) {
               const msg = err?.message ?? String(err);
               if (!msg.includes("No active lane_multi_call experiment matched tool 'edit'")) {
