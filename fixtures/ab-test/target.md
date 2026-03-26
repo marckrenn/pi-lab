@@ -1,3 +1,0 @@
-start
-TOKEN=OLD
-end

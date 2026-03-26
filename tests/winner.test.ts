@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { selectWinner } from "../pi-extension/ab/winner.ts";
+import { selectWinner } from "../pi-extension/lab/winner.ts";
 
 describe("winner selection", () => {
   test("hardcoded mode always selects configured hardcoded lane", async () => {

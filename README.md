@@ -45,7 +45,7 @@ For local repo development:
 
 ```bash
 cd /path/to/pi-lab
-pi -e ./pi-extension/ab/index.ts
+pi -e ./pi-extension/lab/index.ts
 ```
 
 ## Set up your first experiment

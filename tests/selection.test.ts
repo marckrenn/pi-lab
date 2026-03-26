@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { rankFormulaLanes } from "../pi-extension/ab/selection.ts";
+import { rankFormulaLanes } from "../pi-extension/lab/selection.ts";
 
 const baseExperiment = {
   id: "e",

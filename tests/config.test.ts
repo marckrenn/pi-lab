@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
-import { canonicalExecutionStrategy, loadExperiments, setExperimentEnabled, validateExperimentConfig } from "../pi-extension/ab/config.ts";
+import { canonicalExecutionStrategy, loadExperiments, setExperimentEnabled, validateExperimentConfig } from "../pi-extension/lab/config.ts";
 
 function mkExp(id: string, tool: string, winner: string = "formula") {
   return {

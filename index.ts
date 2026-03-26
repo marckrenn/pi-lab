@@ -1,2 +1,2 @@
-export { createAbExtension } from "./pi-extension/ab/index.ts";
-export { default } from "./pi-extension/ab/index.ts";
+export { createAbExtension } from "./pi-extension/lab/index.ts";
+export { default } from "./pi-extension/lab/index.ts";

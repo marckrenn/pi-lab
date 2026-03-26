@@ -3,15 +3,15 @@
 ## Repo areas
 
 Core files:
-- `pi-extension/ab/index.ts` — interception wiring, tool registration, `/lab` command
-- `pi-extension/ab/config.ts` — experiment loading, validation, matching, path resolution
-- `pi-extension/ab/runner.ts` — lane execution and worktree handling
-- `pi-extension/ab/storage.ts` — run manifests, lane records, aggregate logging
-- `pi-extension/ab/selection.ts` — formula scoring and ranking
-- `pi-extension/ab/winner.ts` — winner selection logic
-- `pi-extension/ab/grading.ts` — LLM grader orchestration
-- `pi-extension/ab/gc.ts` — cleanup logic
-- `pi-extension/ab/types.ts` — runtime types
+- `pi-extension/lab/index.ts` — interception wiring, tool registration, `/lab` command
+- `pi-extension/lab/config.ts` — experiment loading, validation, matching, path resolution
+- `pi-extension/lab/runner.ts` — lane execution and worktree handling
+- `pi-extension/lab/storage.ts` — run manifests, lane records, aggregate logging
+- `pi-extension/lab/selection.ts` — formula scoring and ranking
+- `pi-extension/lab/winner.ts` — winner selection logic
+- `pi-extension/lab/grading.ts` — LLM grader orchestration
+- `pi-extension/lab/gc.ts` — cleanup logic
+- `pi-extension/lab/types.ts` — runtime types
 
 ## Local checks
 

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "bun:test";
 import { createEditTool } from "@mariozechner/pi-coding-agent";
-import { resolveFixedArgsInterceptorSupport } from "../pi-extension/ab/index.ts";
+import { resolveFixedArgsInterceptorSupport } from "../pi-extension/lab/index.ts";
 
 describe("resolveFixedArgsInterceptorSupport", () => {
   const tmpRoots: string[] = [];

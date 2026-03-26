@@ -100,7 +100,7 @@ function detectExtensionCallerDir(): string | undefined {
 
     if (!rawPath.includes("/") && !rawPath.includes("\\")) continue;
     if (rawPath.includes("node:internal") || rawPath.includes("node_modules/@mariozechner/pi-coding-agent")) continue;
-    if (rawPath.includes("/pi-extension/ab/index.")) continue;
+    if (rawPath.includes("/pi-extension/lab/index.")) continue;
     if (!rawPath.includes(".") ) continue;
 
     return dirname(rawPath);

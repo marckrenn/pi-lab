@@ -12,9 +12,8 @@
   ],
   "description": "pi A/B extension runner for lane-level experiments.",
   "scripts": {
-    "typecheck": "bun -e \"await import('./pi-extension/ab/index.ts'); await import('./pi-extension/ab/config.ts'); await import('./pi-extension/ab/runner.ts'); await import('./pi-extension/ab/grading.ts'); await import('./pi-extension/ab/selection.ts'); await import('./pi-extension/ab/winner.ts'); console.log('typecheck-ok')\"",
-    "test": "bun test ./tests",
-    "release:dry-run": "bash scripts/release-dry-run.sh"
+    "typecheck": "bun -e \"await import('./pi-extension/lab/index.ts'); await import('./pi-extension/lab/config.ts'); await import('./pi-extension/lab/runner.ts'); await import('./pi-extension/lab/grading.ts'); await import('./pi-extension/lab/selection.ts'); await import('./pi-extension/lab/winner.ts'); console.log('typecheck-ok')\"",
+    "test": "bun test ./tests"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
@@ -22,7 +21,7 @@
   },
   "pi": {
     "extensions": [
-      "./pi-extension/ab/index.ts"
+      "./pi-extension/lab/index.ts"
     ]
   },
   "license": "MIT",
@@ -43,6 +42,6 @@
     "index.ts",
     "README.md",
     "LICENSE",
-    "pi-extension/ab/**"
+    "pi-extension/lab/**"
   ]
 }

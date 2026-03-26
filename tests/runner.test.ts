@@ -12,8 +12,8 @@ import {
   resolveLaneModelOverride,
   runBaselineFixedArgsFallbackNoGit,
   runExperimentLanesFixedArgsTool,
-} from "../pi-extension/ab/runner.ts";
-import type { LaneConfig, LoadedExperiment } from "../pi-extension/ab/types.ts";
+} from "../pi-extension/lab/runner.ts";
+import type { LaneConfig, LoadedExperiment } from "../pi-extension/lab/types.ts";
 
 describe("direct lane harness extension compatibility checks", () => {
   const tmpRoots: string[] = [];
