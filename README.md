@@ -101,14 +101,27 @@ That means:
 - outside a git repo, `pi-lab` falls back to the baseline lane only
 - fallback reasons are written to telemetry so the behavior is visible
 
+For cross-repo edit experiments:
+- exact `edit(path, oldText, newText)` calls are rooted at the target file's repo automatically
+- this explicit `path` guidance is currently about file-targeted proxy `edit` flows, not about every tool in pi-lab
+- proxy-flow edit calls (`task/context/constraints`) should include an explicit `path` field when they target a specific file, especially across repos
+- if `path` is omitted, pi-lab falls back to path inference from prompt text, which is less reliable than passing `path` explicitly
+- if the resolved target path is not inside a git repo, pi-lab warns and falls back to the baseline lane only
+
 ## `/lab`
 
 `/lab` is the built-in control surface for pi-lab.
 
 - `/lab` opens the interactive menu
 - `/lab create` injects an experiment-setup kickoff into the normal conversation
-- the menu has **Experiments**, **Runs**, and **Maintenance**
-- text commands like `/lab experiments`, `/lab runs`, `/lab status`, `/lab validate`, and `/lab gc ...` also work
+- the menu has **Experiments**, **Runs**, **Maintenance**, and **Tools**
+- text commands like `/lab experiments`, `/lab runs`, `/lab status`, `/lab validate`, `/lab tools`, and `/lab gc ...` also work
+
+`/lab tools` includes:
+- runtime status for the current session
+- **Intercept builtins**: inspect builtin tools dynamically from the live tool registry
+- per-builtin **Active** controls with clearer labels such as `enabled (default)` or `disabled (session override)`
+- per-builtin **Routing** controls when a same-name pi-lab interceptor supports `lab` vs `native` routing
 
 More details:
 - [Troubleshooting and operations](docs/troubleshooting.md)

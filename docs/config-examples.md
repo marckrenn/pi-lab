@@ -76,6 +76,16 @@ Behavior notes:
 
 If you want the agent to keep using the builtin name naturally, keep the replacement under that same builtin name.
 
+For proxy-flow builtin replacement, the most reliable shape is:
+- `task`
+- optional `path`
+- optional `context`
+- optional `constraints`
+
+For `edit`, include `path` whenever the flow targets a specific file. This is especially important for cross-repo edits because pi-lab can then root lane worktrees in the target file's git repo instead of relying on prompt-text path inference.
+
+This does not mean every pi-lab tool now needs a `path` field. It is specifically the recommended shape for file-targeted proxy `edit` flows.
+
 Example goal:
 - user says “edit this file”
 - agent should call `edit`
@@ -110,6 +120,17 @@ Companion extension side:
 Rule of thumb:
 - if you want natural builtin-like usage, register the replacement as `edit`
 - if you want an explicit benchmark/proxy flow, use a distinct name such as `edit_experiment`
+
+Example proxy-flow edit call shape:
+
+```jsonc
+{
+  "task": "Make a few harmless dummy edits to this file.",
+  "path": "/Users/me/project/playground/basic.txt",
+  "context": "Plain-text playground file with placeholder content.",
+  "constraints": "Only modify that file. Keep the changes small and obviously dummy/test-oriented."
+}
+```
 
 ## Hardcoded winner
 

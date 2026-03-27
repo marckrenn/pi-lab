@@ -27,6 +27,9 @@ Useful commands:
 /lab validate
 /lab runs
 /lab maintenance
+/lab tools
+/lab tools builtins
+/lab tools refresh
 /lab gc --keep-last 10
 /lab gc --keep-last 10 --force
 /lab gc --older-than 7d
@@ -66,6 +69,23 @@ Typical problems include:
 
 Invalid experiments are skipped at runtime.
 
+## `/lab tools`
+
+`/lab tools` is the runtime control surface for the current session.
+
+Useful cases:
+- inspect whether a builtin name is active or disabled in the session
+- inspect whether a same-name pi-lab interceptor is visible
+- toggle builtin tool availability on/off per session
+- switch supported builtins between `lab` routing and `native` routing
+
+Current labels mean:
+- `enabled (default)` / `disabled (default)` — matches pi's default builtin tool set
+- `enabled (session override)` / `disabled (session override)` — changed in this session
+- `pi default` — no pi-lab routing toggle is active for that builtin
+- `lab (...)` — prefer the pi-lab interceptor when supported
+- `native (...)` — force native bypass when supported
+
 ## Debug controls
 
 Config:
@@ -96,3 +116,6 @@ Important nuance:
 - `deactivate_builtin_tools` updates the active tool list for the pi-lab-managed main session
 - it does **not** by itself add prompt guidance or explain why the replacement should be preferred
 - if you expose a separate proxy tool name, agents will usually treat it as a special-purpose tool rather than the default builtin replacement
+- for proxy-flow `edit` experiments, include an explicit `path` when the task targets a specific file, especially across repos
+- this is a recommendation for file-targeted proxy `edit` flows, not a requirement that every pi-lab tool expose `path`
+- if the resolved target path is not inside a git repo, pi-lab warns and falls back to the baseline lane only
