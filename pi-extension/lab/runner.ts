@@ -1,5 +1,6 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { createEditTool } from "@mariozechner/pi-coding-agent";
 import type { LoadedExperiment, LaneConfig, LaneHarnessFallbackReason, LaneRunRecord, LaneThinkingLevel } from "./types.ts";
@@ -41,6 +42,195 @@ function toPosixPath(path: string): string {
 function relativeTargetPath(cwd: string, inputPath: string): string {
   if (inputPath.startsWith("/")) return toPosixPath(relative(cwd, inputPath));
   return toPosixPath(inputPath);
+}
+
+export type EditExecutionContext = {
+  executionCwd: string;
+  applyCwd: string;
+  normalizedPath: string;
+  targetFilePath: string;
+  targetGit: Awaited<ReturnType<typeof detectGitRepository>>;
+};
+
+export type FlowToolExecutionContext = {
+  executionCwd: string;
+  applyCwd: string;
+  flowArgs: { task: string; path?: string; context?: string; constraints?: string };
+  matchedPath?: string;
+  normalizedPath?: string;
+  targetFilePath?: string;
+  targetGit?: Awaited<ReturnType<typeof detectGitRepository>>;
+};
+
+function trimPathCandidate(raw: string): string {
+  let value = raw.trim();
+  while (value.length > 0 && /[),.;:!?\]}'"`>]/.test(value.at(-1) ?? "")) {
+    value = value.slice(0, -1);
+  }
+  return value;
+}
+
+function slashSegmentCount(path: string): number {
+  return path.split("/").filter(Boolean).length;
+}
+
+function pathCandidateQuality(rawPath: string, resolvedPath: string): number {
+  let score = 0;
+  if (rawPath.startsWith("~/")) score += 4;
+  if (resolvedPath.startsWith("/Users/")) score += 6;
+  if (existsSync(resolvedPath)) score += 10;
+  if (existsSync(dirname(resolvedPath)) && dirname(resolvedPath) !== "/") score += 3;
+  score += Math.min(slashSegmentCount(resolvedPath), 8);
+  score += Math.min(resolvedPath.length / 40, 4);
+  return score;
+}
+
+function expandPathCandidate(rawPath: string): string {
+  if (rawPath.startsWith("~/")) return join(homedir(), rawPath.slice(2));
+  return rawPath;
+}
+
+function collectAbsolutePathCandidates(text: string | undefined): Array<{ raw: string; resolved: string }> {
+  if (!text) return [];
+  const matches = text.match(/(?:~\/|\/)[^\s"'`<>]+/g) ?? [];
+  const deduped = new Map<string, { raw: string; resolved: string }>();
+
+  for (const match of matches) {
+    const raw = trimPathCandidate(match);
+    if (!raw.startsWith("/") && !raw.startsWith("~/")) continue;
+    const resolved = expandPathCandidate(raw);
+    const parent = dirname(resolved);
+    const exists = existsSync(resolved);
+    const parentExists = existsSync(parent);
+    const segments = slashSegmentCount(resolved);
+    if (!exists && (!parentExists || parent === "/" || segments < 3)) continue;
+    deduped.set(resolved, { raw, resolved });
+  }
+
+  return Array.from(deduped.values()).sort((a, b) => pathCandidateQuality(b.raw, b.resolved) - pathCandidateQuality(a.raw, a.resolved));
+}
+
+function selectProxyEditPathCandidate(flowArgs: { task: string; path?: string; context?: string; constraints?: string }): { raw: string; resolved: string } | undefined {
+  if (typeof flowArgs.path === "string" && flowArgs.path.trim()) {
+    const raw = flowArgs.path.trim();
+    return { raw, resolved: expandPathCandidate(raw) };
+  }
+
+  const prioritizedGroups = [flowArgs.constraints, flowArgs.task, flowArgs.context].map(collectAbsolutePathCandidates);
+  for (const group of prioritizedGroups) {
+    if (group.length === 1) return group[0];
+  }
+
+  const merged = new Map<string, { raw: string; resolved: string }>();
+  for (const group of prioritizedGroups) {
+    for (const entry of group) merged.set(entry.resolved, entry);
+  }
+  return merged.size === 1 ? Array.from(merged.values())[0] : undefined;
+}
+
+function rewriteFlowArgsPathReferences(
+  flowArgs: { task: string; path?: string; context?: string; constraints?: string },
+  candidates: string[],
+  replacementPath: string,
+): { task: string; path?: string; context?: string; constraints?: string } {
+  const replaceAll = (value: string | undefined) => {
+    if (!value) return value;
+    let next = value;
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      next = next.split(candidate).join(replacementPath);
+    }
+    return next;
+  };
+
+  return {
+    task: replaceAll(flowArgs.task) ?? flowArgs.task,
+    path: flowArgs.path ? replaceAll(flowArgs.path) : flowArgs.path,
+    context: replaceAll(flowArgs.context),
+    constraints: replaceAll(flowArgs.constraints),
+  };
+}
+
+export async function resolveFlowToolExecutionContext(
+  sessionCwd: string,
+  toolName: string,
+  flowArgs: { task: string; path?: string; context?: string; constraints?: string },
+  signal?: AbortSignal,
+): Promise<FlowToolExecutionContext> {
+  if (toolName !== "edit") {
+    return {
+      executionCwd: sessionCwd,
+      applyCwd: sessionCwd,
+      flowArgs,
+    };
+  }
+
+  const candidate = selectProxyEditPathCandidate(flowArgs);
+  if (!candidate) {
+    return {
+      executionCwd: sessionCwd,
+      applyCwd: sessionCwd,
+      flowArgs,
+    };
+  }
+
+  const editExecution = await resolveEditExecutionContext(sessionCwd, candidate.resolved, signal);
+  const rewrittenArgs = rewriteFlowArgsPathReferences(
+    flowArgs,
+    Array.from(new Set([candidate.raw, candidate.resolved, editExecution.targetFilePath])),
+    editExecution.normalizedPath,
+  );
+
+  return {
+    executionCwd: editExecution.executionCwd,
+    applyCwd: editExecution.applyCwd,
+    flowArgs: rewrittenArgs,
+    matchedPath: candidate.resolved,
+    normalizedPath: editExecution.normalizedPath,
+    targetFilePath: editExecution.targetFilePath,
+    targetGit: editExecution.targetGit,
+  };
+}
+
+export async function resolveEditExecutionContext(
+  sessionCwd: string,
+  requestedPath: string,
+  signal?: AbortSignal,
+): Promise<EditExecutionContext> {
+  const targetFilePath = resolve(sessionCwd, requestedPath);
+  const canonicalTargetFilePath = existsSync(targetFilePath) ? realpathSync(targetFilePath) : targetFilePath;
+  const probeDir = existsSync(canonicalTargetFilePath) && statSync(canonicalTargetFilePath).isDirectory()
+    ? canonicalTargetFilePath
+    : dirname(canonicalTargetFilePath);
+  const targetGit = await detectGitRepository(probeDir, signal);
+
+  if (targetGit.ok) {
+    return {
+      executionCwd: targetGit.repoRoot,
+      applyCwd: targetGit.repoRoot,
+      normalizedPath: relativeTargetPath(targetGit.repoRoot, canonicalTargetFilePath),
+      targetFilePath: canonicalTargetFilePath,
+      targetGit,
+    };
+  }
+
+  if (requestedPath.startsWith("/")) {
+    return {
+      executionCwd: probeDir,
+      applyCwd: probeDir,
+      normalizedPath: relativeTargetPath(probeDir, canonicalTargetFilePath),
+      targetFilePath: canonicalTargetFilePath,
+      targetGit,
+    };
+  }
+
+  return {
+    executionCwd: sessionCwd,
+    applyCwd: sessionCwd,
+    normalizedPath: relativeTargetPath(sessionCwd, requestedPath),
+    targetFilePath: canonicalTargetFilePath,
+    targetGit,
+  };
 }
 
 async function gitOutput(cwd: string, args: string[], signal?: AbortSignal): Promise<string> {
@@ -424,7 +614,7 @@ function lanePrompt(lane: LaneConfig, editArgs: { path: string; oldText: string;
 function laneMultiCallPrompt(
   lane: LaneConfig,
   targetTool: string,
-  args: { task: string; context?: string; constraints?: string },
+  args: { task: string; path?: string; context?: string; constraints?: string },
 ): string {
   return [
     `You are lane ${lane.id} in a lab experiment for tool '${targetTool}'.`,
@@ -435,6 +625,7 @@ function laneMultiCallPrompt(
     '{"status":"success|error","final_answer":"...required...","full_answer":"...optional...","steps":["...optional..."],"error":"...optional..."}',
     "Use final_answer for the concise result/value. If the caller asked for steps or explanation, put the exact user-facing response in full_answer, or provide steps[] and final_answer.",
     "",
+    args.path ? `TARGET_PATH: ${args.path}` : "",
     `USER_TASK: ${args.task}`,
     args.context ? `CONTEXT: ${args.context}` : "",
     args.constraints ? `CONSTRAINTS: ${args.constraints}` : "",
@@ -446,7 +637,7 @@ function laneMultiCallPrompt(
 function laneSingleCallPrompt(
   lane: LaneConfig,
   targetTool: string,
-  args: { task: string; context?: string; constraints?: string },
+  args: { task: string; path?: string; context?: string; constraints?: string },
 ): string {
   return [
     `You are lane ${lane.id} in a lab experiment for tool '${targetTool}'.`,
@@ -454,6 +645,7 @@ function laneSingleCallPrompt(
     "Do NOT call any other tools.",
     "After the tool call, respond with exactly: LANE_DONE",
     "",
+    args.path ? `TARGET_PATH: ${args.path}` : "",
     `USER_TASK: ${args.task}`,
     args.context ? `CONTEXT: ${args.context}` : "",
     args.constraints ? `CONSTRAINTS: ${args.constraints}` : "",
@@ -1304,7 +1496,7 @@ export async function runBaselineSingleCallFallbackNoGit(
   run: RunContext,
   cwd: string,
   targetTool: string,
-  flowArgs: { task: string; context?: string; constraints?: string },
+  flowArgs: { task: string; path?: string; context?: string; constraints?: string },
   signal?: AbortSignal,
   inheritedModel?: string,
   inheritedThinking?: LaneThinkingLevel,
@@ -1360,7 +1552,7 @@ export async function runBaselineMultiCallFallbackNoGit(
   run: RunContext,
   cwd: string,
   targetTool: string,
-  flowArgs: { task: string; context?: string; constraints?: string },
+  flowArgs: { task: string; path?: string; context?: string; constraints?: string },
   signal?: AbortSignal,
   inheritedModel?: string,
   inheritedThinking?: LaneThinkingLevel,
@@ -2245,7 +2437,7 @@ export async function runExperimentLanesSingleCall(
   run: RunContext,
   cwd: string,
   targetTool: string,
-  flowArgs: { task: string; context?: string; constraints?: string },
+  flowArgs: { task: string; path?: string; context?: string; constraints?: string },
   signal?: AbortSignal,
   onProgress?: (snapshot: LaneProgressSnapshot) => void,
   inheritedModel?: string,
@@ -2560,7 +2752,7 @@ export async function runExperimentLanesMultiCall(
   run: RunContext,
   cwd: string,
   targetTool: string,
-  flowArgs: { task: string; context?: string; constraints?: string },
+  flowArgs: { task: string; path?: string; context?: string; constraints?: string },
   signal?: AbortSignal,
   onProgress?: (snapshot: LaneProgressSnapshot) => void,
   inheritedModel?: string,

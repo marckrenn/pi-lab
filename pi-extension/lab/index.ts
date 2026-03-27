@@ -45,6 +45,8 @@ import { createRunContext, pruneEmptyRunScaffolding, writeLaneRecords, writeRunM
 import {
   applyPatchToMain,
   detectGitRepository,
+  resolveEditExecutionContext,
+  resolveFlowToolExecutionContext,
   runBaselineEditFallbackNoGit,
   runBaselineFixedArgsFallbackNoGit,
   runBaselineMultiCallFallbackNoGit,
@@ -68,6 +70,7 @@ const EditParams = Type.Object({
 
 const ReplanFlowParams = Type.Object({
   task: Type.String({ description: "Goal for this flow. Lanes may have different concrete APIs and will replan." }),
+  path: Type.Optional(Type.String({ description: "Optional target path when this flow operates on a specific file" })),
   context: Type.Optional(Type.String({ description: "Optional context for the flow" })),
   constraints: Type.Optional(Type.String({ description: "Optional constraints/instructions" })),
 });
@@ -85,7 +88,7 @@ function isExactEditInput(params: any): params is { path: string; oldText: strin
   return typeof params?.path === "string" && typeof params?.oldText === "string" && typeof params?.newText === "string";
 }
 
-function isReplanFlowInput(params: any): params is { task: string; context?: string; constraints?: string } {
+function isReplanFlowInput(params: any): params is { task: string; path?: string; context?: string; constraints?: string } {
   return typeof params?.task === "string";
 }
 
@@ -704,7 +707,7 @@ const NON_GIT_BASELINE_FALLBACK_REASON = "non_git_baseline_lane";
 function nonGitBaselineFallbackMessage(errorText: string): string {
   return [
     "pi-lab requires a git repository for isolated worktrees.",
-    "Current cwd is not inside a git repo, so pi-lab ran only the baseline lane in-place.",
+    "The selected execution root is not inside a git repo, so pi-lab ran only the baseline lane in-place.",
     `Git error: ${errorText.trim()}`,
   ].join(" ");
 }
@@ -841,6 +844,9 @@ function proxyToolPromptGuidelines(toolName: string, configuredDescription?: str
   }
 
   guidelines.push(`'${toolName}' accepts a task plus optional context/constraints and will route the request through pi-lab experiment lanes.`);
+  if (toolName.toLowerCase() === "edit") {
+    guidelines.push("When the task targets a specific file, include the path field as well so pi-lab can root cross-repo lanes in the correct repository.");
+  }
   return guidelines;
 }
 
@@ -1081,7 +1087,7 @@ async function runFixedArgsToolExperiment(
 }
 
 async function runSingleCallFlowExperiment(
-  params: { task: string; context?: string; constraints?: string },
+  params: { task: string; path?: string; context?: string; constraints?: string },
   toolName: string,
   signal: AbortSignal | undefined,
   ctx: any,
@@ -1103,7 +1109,10 @@ async function runSingleCallFlowExperiment(
   const experiment = loaded.experiment;
   cooldownState.set(experiment.id, now);
 
-  const run = createRunContext(ctx.cwd, experiment.id, loaded.source);
+  const flowExecution = await resolveFlowToolExecutionContext(ctx.cwd, toolName, params, signal);
+  const effectiveFlowArgs = flowExecution.flowArgs;
+
+  const run = createRunContext(flowExecution.executionCwd, experiment.id, loaded.source);
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
@@ -1111,8 +1120,16 @@ async function runSingleCallFlowExperiment(
     intercepted_tool: toolName,
     intercepted_args: {
       task_len: params.task.length,
+      requested_path: params.path,
       context_len: (params.context ?? "").length,
       constraints_len: (params.constraints ?? "").length,
+      effective_task_len: effectiveFlowArgs.task.length,
+      effective_requested_path: effectiveFlowArgs.path,
+      effective_context_len: (effectiveFlowArgs.context ?? "").length,
+      effective_constraints_len: (effectiveFlowArgs.constraints ?? "").length,
+      matched_path: flowExecution.matchedPath,
+      effective_path: flowExecution.normalizedPath,
+      execution_cwd: flowExecution.executionCwd,
     },
     execution_strategy: canonicalExecutionStrategy(executionStrategyOf(experiment)),
     lane_harness: inferLaneHarness(executionStrategyOf(experiment)),
@@ -1120,13 +1137,22 @@ async function runSingleCallFlowExperiment(
   });
 
   const laneStatusKey = "lab-lanes";
-  const gitRepo = await detectGitRepository(ctx.cwd, signal);
+  const gitRepo = await detectGitRepository(flowExecution.executionCwd, signal);
 
   if (!gitRepo.ok) {
     const warning = nonGitBaselineFallbackMessage(gitRepo.error);
     ctx.ui.notify(warning, "warning");
 
-    const fallback = await runBaselineSingleCallFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model, inheritedThinking);
+    const fallback = await runBaselineSingleCallFallbackNoGit(
+      loaded,
+      run,
+      flowExecution.executionCwd,
+      toolName,
+      effectiveFlowArgs,
+      signal,
+      ctx.model,
+      inheritedThinking,
+    );
     const lanes = [fallback.lane];
     writeLaneRecords(run, lanes);
     writeRunManifest(run, experiment, {
@@ -1177,9 +1203,9 @@ async function runSingleCallFlowExperiment(
     const laneRun = await runExperimentLanesSingleCall(
       loaded,
       run,
-      ctx.cwd,
+      flowExecution.executionCwd,
       toolName,
-      params,
+      effectiveFlowArgs,
       signal,
       (snapshot) => {
         updateLaneWidget(ctx, laneStatusKey, experiment.id, snapshot);
@@ -1195,7 +1221,15 @@ async function runSingleCallFlowExperiment(
       ...summarizeLaneFailures(lanes),
     });
 
-    const winner = await selectWinner(loaded, run, ctx.cwd, lanes, { intercepted_tool: toolName, intercepted_args: params as Record<string, unknown> }, ctx.model, signal);
+    const winner = await selectWinner(
+      loaded,
+      run,
+      flowExecution.executionCwd,
+      lanes,
+      { intercepted_tool: toolName, intercepted_args: effectiveFlowArgs as Record<string, unknown> },
+      ctx.model,
+      signal,
+    );
     const selected = laneById(lanes, winner.winner_lane_id);
     if (!selected) {
       throw new Error(`Winner lane ${winner.winner_lane_id} not found.`);
@@ -1262,7 +1296,7 @@ async function runSingleCallFlowExperiment(
 }
 
 async function runMultiCallFlowExperiment(
-  params: { task: string; context?: string; constraints?: string },
+  params: { task: string; path?: string; context?: string; constraints?: string },
   toolName: string,
   signal: AbortSignal | undefined,
   ctx: any,
@@ -1284,7 +1318,10 @@ async function runMultiCallFlowExperiment(
   const experiment = loaded.experiment;
   cooldownState.set(experiment.id, now);
 
-  const run = createRunContext(ctx.cwd, experiment.id, loaded.source);
+  const flowExecution = await resolveFlowToolExecutionContext(ctx.cwd, toolName, params, signal);
+  const effectiveFlowArgs = flowExecution.flowArgs;
+
+  const run = createRunContext(flowExecution.executionCwd, experiment.id, loaded.source);
   writeRunManifest(run, experiment, {
     source: loaded.source,
     config_path: loaded.path,
@@ -1292,8 +1329,16 @@ async function runMultiCallFlowExperiment(
     intercepted_tool: toolName,
     intercepted_args: {
       task_len: params.task.length,
+      requested_path: params.path,
       context_len: (params.context ?? "").length,
       constraints_len: (params.constraints ?? "").length,
+      effective_task_len: effectiveFlowArgs.task.length,
+      effective_requested_path: effectiveFlowArgs.path,
+      effective_context_len: (effectiveFlowArgs.context ?? "").length,
+      effective_constraints_len: (effectiveFlowArgs.constraints ?? "").length,
+      matched_path: flowExecution.matchedPath,
+      effective_path: flowExecution.normalizedPath,
+      execution_cwd: flowExecution.executionCwd,
     },
     execution_strategy: canonicalExecutionStrategy(executionStrategyOf(experiment)),
     lane_harness: inferLaneHarness(executionStrategyOf(experiment)),
@@ -1301,13 +1346,22 @@ async function runMultiCallFlowExperiment(
   });
 
   const laneStatusKey = "lab-lanes";
-  const gitRepo = await detectGitRepository(ctx.cwd, signal);
+  const gitRepo = await detectGitRepository(flowExecution.executionCwd, signal);
 
   if (!gitRepo.ok) {
     const warning = nonGitBaselineFallbackMessage(gitRepo.error);
     ctx.ui.notify(warning, "warning");
 
-    const fallback = await runBaselineMultiCallFallbackNoGit(loaded, run, ctx.cwd, toolName, params, signal, ctx.model, inheritedThinking);
+    const fallback = await runBaselineMultiCallFallbackNoGit(
+      loaded,
+      run,
+      flowExecution.executionCwd,
+      toolName,
+      effectiveFlowArgs,
+      signal,
+      ctx.model,
+      inheritedThinking,
+    );
     const lanes = [fallback.lane];
     writeLaneRecords(run, lanes);
     writeRunManifest(run, experiment, {
@@ -1358,9 +1412,9 @@ async function runMultiCallFlowExperiment(
     const lanes = await runExperimentLanesMultiCall(
       loaded,
       run,
-      ctx.cwd,
+      flowExecution.executionCwd,
       toolName,
-      params,
+      effectiveFlowArgs,
       signal,
       (snapshot) => {
         updateLaneWidget(ctx, laneStatusKey, experiment.id, snapshot);
@@ -1374,7 +1428,15 @@ async function runMultiCallFlowExperiment(
       ...summarizeLaneFailures(lanes),
     });
 
-    const winner = await selectWinner(loaded, run, ctx.cwd, lanes, { intercepted_tool: toolName, intercepted_args: params as Record<string, unknown> }, ctx.model, signal);
+    const winner = await selectWinner(
+      loaded,
+      run,
+      flowExecution.executionCwd,
+      lanes,
+      { intercepted_tool: toolName, intercepted_args: effectiveFlowArgs as Record<string, unknown> },
+      ctx.model,
+      signal,
+    );
     const selected = laneById(lanes, winner.winner_lane_id);
     if (!selected) {
       throw new Error(`Winner lane ${winner.winner_lane_id} not found.`);
@@ -1392,13 +1454,13 @@ async function runMultiCallFlowExperiment(
 
     const selectedPatchPath = selected.patch_path && (selected.patch_bytes ?? 0) > 0 ? selected.patch_path : undefined;
     if (selectedPatchPath) {
-      const apply = await applyPatchToMain(ctx.cwd, selectedPatchPath, signal);
+      const apply = await applyPatchToMain(flowExecution.applyCwd, selectedPatchPath, signal);
       if (!apply.ok) {
         if (policy.on_winner_apply_failure === "fallback_baseline_then_fail") {
           const baseline = laneById(lanes, getBaselineLaneId(experiment));
           const baselinePatchPath = baseline?.patch_path && (baseline.patch_bytes ?? 0) > 0 ? baseline.patch_path : undefined;
           if (baseline && baselinePatchPath && baselinePatchPath !== selectedPatchPath) {
-            const fallbackApply = await applyPatchToMain(ctx.cwd, baselinePatchPath, signal);
+            const fallbackApply = await applyPatchToMain(flowExecution.applyCwd, baselinePatchPath, signal);
             if (fallbackApply.ok) {
               returnedLane = baseline;
               returnedWinnerMode = `${winner.mode_used} + baseline-apply-fallback`;
@@ -1859,13 +1921,15 @@ async function startCreateExperimentConversation(pi: ExtensionAPI, ctx: any, ini
   ctx.ui.notify("Queued the lab experiment setup conversation as a follow-up.", "info");
 }
 
-async function showLabsMenu(pi: ExtensionAPI, ctx: any, experimentDirs?: string[]) {
+async function showLabsMenu(pi: ExtensionAPI, ctx: any, experimentDirs?: string[], toolsMenu?: () => Promise<void>) {
   while (true) {
-    const choice = await ctx.ui.select("pi-lab", [
+    const choices = [
       "Experiments",
       "Runs",
       "Maintenance",
-    ]);
+      ...(toolsMenu ? ["Tools"] : []),
+    ];
+    const choice = await ctx.ui.select("pi-lab", choices);
     if (!choice) return;
 
     if (choice === "Experiments") {
@@ -1880,6 +1944,11 @@ async function showLabsMenu(pi: ExtensionAPI, ctx: any, experimentDirs?: string[
 
     if (choice === "Maintenance") {
       await showMaintenanceMenu(ctx);
+      continue;
+    }
+
+    if (choice === "Tools" && toolsMenu) {
+      await toolsMenu();
     }
   }
 }
@@ -1887,8 +1956,209 @@ async function showLabsMenu(pi: ExtensionAPI, ctx: any, experimentDirs?: string[
 function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]) {
   const cooldownState = new Map<string, number>();
   const defaultEditToolRenderer = createEditTool(process.cwd());
+  const knownBuiltinTools = new Map<string, any>();
+  const defaultActiveBuiltinToolNames = new Set(["read", "bash", "edit", "write"]);
+  const builtinRoutingPreferences = new Map<string, "lab" | "native">();
+  const builtinRoutingSupport = new Map<string, { supportsToggle: boolean; reason?: string }>();
+  let lastEditRouting:
+    | {
+        at: string;
+        route: string;
+        reason: string;
+        runId?: string;
+        experimentId?: string;
+        winnerLaneId?: string;
+        winnerMode?: string;
+      }
+    | undefined;
 
-  pi.on("session_start", (_event, ctx) => {
+  function rememberEditRouting(route: string, reason: string, extra?: Partial<NonNullable<typeof lastEditRouting>>) {
+    lastEditRouting = {
+      at: new Date().toISOString(),
+      route,
+      reason,
+      ...extra,
+    };
+  }
+
+  function refreshKnownBuiltinTools() {
+    for (const tool of pi.getAllTools()) {
+      if (tool.sourceInfo?.source !== "builtin") continue;
+      knownBuiltinTools.set(tool.name, tool);
+    }
+  }
+
+  function defaultBuiltinToolEnabled(name: string): boolean {
+    return defaultActiveBuiltinToolNames.has(name);
+  }
+
+  function getBuiltinRoutingMode(name: string): "lab" | "native" {
+    return builtinRoutingPreferences.get(name) ?? "lab";
+  }
+
+  function setBuiltinRoutingMode(name: string, mode: "lab" | "native") {
+    builtinRoutingPreferences.set(name, mode);
+  }
+
+  function builtinToolState(name: string) {
+    refreshKnownBuiltinTools();
+    const activeToolNames = new Set(pi.getActiveTools());
+    const currentEntries = pi.getAllTools().filter((tool) => tool.name === name);
+    const builtinEntries = currentEntries.filter((tool) => tool.sourceInfo?.source === "builtin");
+    const extensionEntries = currentEntries.filter((tool) => tool.sourceInfo?.source !== "builtin" && tool.sourceInfo?.source !== "sdk");
+    const known = knownBuiltinTools.get(name);
+    const active = activeToolNames.has(name);
+    const defaultEnabled = defaultBuiltinToolEnabled(name);
+    const activeStateLabel = active === defaultEnabled
+      ? `${active ? "enabled" : "disabled"} (default)`
+      : `${active ? "enabled" : "disabled"} (session override)`;
+    const routingSupport = builtinRoutingSupport.get(name);
+    const routingMode = getBuiltinRoutingMode(name);
+
+    let effectiveState = active ? "builtin active" : "disabled in this session";
+    if (active && extensionEntries.length > 0 && builtinEntries.length === 0) {
+      effectiveState = "intercepted by same-name extension";
+    } else if (active && extensionEntries.length > 0) {
+      effectiveState = "active with both builtin and extension entries visible";
+    } else if (!active && extensionEntries.length > 0) {
+      effectiveState = "builtin disabled; same-name extension still visible";
+    }
+
+    const routingLabel = routingSupport?.supportsToggle
+      ? `${routingMode} (${routingMode === "lab" ? "intercept when possible" : "force native bypass"})`
+      : extensionEntries.length > 0
+        ? `n/a (${routingSupport?.reason ?? "no native bypass toggle available"})`
+        : "pi default";
+
+    return {
+      name,
+      active,
+      defaultEnabled,
+      known,
+      builtinEntries,
+      extensionEntries,
+      effectiveState,
+      activeStateLabel,
+      routingMode,
+      routingSupport,
+      routingLabel,
+      description: [
+        `state: ${effectiveState}`,
+        `active state: ${activeStateLabel}`,
+        `routing: ${routingLabel}`,
+        `builtin entries visible now: ${builtinEntries.length}`,
+        `same-name extension entries visible now: ${extensionEntries.length}`,
+        known?.description ? `builtin description: ${known.description}` : undefined,
+        known?.sourceInfo?.path ? `builtin source: ${known.sourceInfo.path}` : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    };
+  }
+
+  function setBuiltinToolEnabled(name: string, enabled: boolean) {
+    const active = new Set(pi.getActiveTools());
+    if (enabled) active.add(name);
+    else active.delete(name);
+    pi.setActiveTools(Array.from(active));
+  }
+
+  function activeValidExperimentsForSession(cwd: string) {
+    return loadExperiments(cwd, { experimentDirs })
+      .filter((e) => e.experiment.enabled !== false)
+      .filter((e) => (e.validation?.errors?.length ?? 0) === 0);
+  }
+
+  function buildEditRuntimeStatusLines(ctx: any): string[] {
+    const allExperiments = loadExperiments(ctx.cwd, { experimentDirs });
+    const activeExperiments = activeValidExperimentsForSession(ctx.cwd);
+    const discoveredEditExperiments = allExperiments.filter((e) => toolNameOf(e.experiment) === "edit");
+    const activeEditExperiments = activeExperiments.filter((e) => toolNameOf(e.experiment) === "edit");
+    const disabledEditExperiments = discoveredEditExperiments.filter((e) => e.experiment.enabled === false);
+    const invalidEditExperiments = discoveredEditExperiments.filter((e) => (e.validation?.errors?.length ?? 0) > 0);
+    const allEditTools = pi.getAllTools().filter((tool) => tool.name === "edit");
+    const activeToolNames = new Set(pi.getActiveTools());
+    const activeEdit = activeToolNames.has("edit");
+    const builtinEditTools = allEditTools.filter((tool) => tool.sourceInfo?.source === "builtin");
+    const extensionEditTools = allEditTools.filter((tool) => tool.sourceInfo?.source !== "builtin" && tool.sourceInfo?.source !== "sdk");
+    const deactivateBuiltinEdit = activeEditExperiments.some((e) => deactivateBuiltinToolsOf(e.experiment).includes("edit"));
+
+    const editRoutingMode = getBuiltinRoutingMode("edit");
+    let currentRouting = "native fallback (no active edit experiment)";
+    if (!activeEdit) {
+      currentRouting = "edit is not active in this session";
+    } else if (editRoutingMode === "native") {
+      currentRouting = "native bypass (session routing preference)";
+    } else if (activeEditExperiments.length > 0 && extensionEditTools.length > 0) {
+      currentRouting = "lab-capable (interceptor registered; falls back to native when no edit experiment matches)";
+    } else if (activeEditExperiments.length > 0) {
+      currentRouting = "ambiguous (edit experiment active, but no extension edit source is visible)";
+    }
+
+    const lines = [
+      "pi-lab tool status",
+      `cwd: ${ctx.cwd}`,
+      `edit routing preference: ${editRoutingMode}`,
+      `current session routing: ${currentRouting}`,
+      `active tool name 'edit': ${activeEdit ? "yes" : "no"}`,
+      `registered edit sources: ${allEditTools.length}`,
+      `builtin edit sources: ${builtinEditTools.length}`,
+      `extension edit sources: ${extensionEditTools.length}`,
+      `active edit experiments: ${activeEditExperiments.length}`,
+      `disabled edit experiments: ${disabledEditExperiments.length}`,
+      `invalid edit experiments: ${invalidEditExperiments.length}`,
+      `deactivate_builtin_tools requests edit: ${deactivateBuiltinEdit ? "yes" : "no"}`,
+    ];
+
+    if (allEditTools.length > 0) {
+      lines.push("", "Registered edit tool entries:");
+      for (const tool of allEditTools) {
+        const source = tool.sourceInfo?.source ?? "unknown";
+        const path = tool.sourceInfo?.path ?? tool.sourceInfo?.origin ?? "?";
+        lines.push(`- ${source} :: ${path}`);
+      }
+    }
+
+    if (activeEditExperiments.length > 0) {
+      lines.push("", "Active edit experiments:");
+      for (const loaded of activeEditExperiments) {
+        lines.push(
+          `- ${loaded.experiment.id} [${loaded.source}] strategy=${canonicalExecutionStrategy(executionStrategyOf(loaded.experiment))} winner=${winnerModeOf(loaded.experiment)} deactivate_builtin_tools=${deactivateBuiltinToolsOf(loaded.experiment).join(",") || "none"}`,
+        );
+      }
+    }
+
+    if (disabledEditExperiments.length > 0) {
+      lines.push("", "Disabled edit experiments:");
+      for (const loaded of disabledEditExperiments) {
+        lines.push(`- ${loaded.experiment.id} [${loaded.source}] path=${loaded.path}`);
+      }
+    }
+
+    if (invalidEditExperiments.length > 0) {
+      lines.push("", "Invalid edit experiments:");
+      for (const loaded of invalidEditExperiments) {
+        lines.push(`- ${loaded.experiment.id} [${loaded.source}] errors=${(loaded.validation?.errors ?? []).join(" | ")}`);
+      }
+    }
+
+    if (lastEditRouting) {
+      lines.push("", "Last observed edit routing:");
+      lines.push(`- at=${lastEditRouting.at}`);
+      lines.push(`- route=${lastEditRouting.route}`);
+      lines.push(`- reason=${lastEditRouting.reason}`);
+      if (lastEditRouting.experimentId) lines.push(`- experiment=${lastEditRouting.experimentId}`);
+      if (lastEditRouting.runId) lines.push(`- run=${lastEditRouting.runId}`);
+      if (lastEditRouting.winnerLaneId) lines.push(`- winner_lane=${lastEditRouting.winnerLaneId}`);
+      if (lastEditRouting.winnerMode) lines.push(`- winner_mode=${lastEditRouting.winnerMode}`);
+    }
+
+    return lines;
+  }
+
+  async function refreshLabSessionTools(ctx: any) {
+    refreshKnownBuiltinTools();
+    builtinRoutingSupport.clear();
     const isLaneOrGrader = process.env.PI_LAB_LANE === "1" || process.env.PI_LAB_GRADER === "1";
     const activeExperiments = loadExperiments(ctx.cwd, { experimentDirs })
       .filter((e) => e.experiment.enabled !== false)
@@ -1924,6 +2194,13 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
         ctx.ui.notify(support.warning, "warning");
       }
 
+      if (support.nativeTool) {
+        builtinRoutingSupport.set(toolName, {
+          supportsToggle: true,
+          reason: "fixed-args lab/native routing available",
+        });
+      }
+
       pi.registerTool({
         name: toolName,
         label: existing?.name ?? toolName,
@@ -1932,6 +2209,9 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
           `Lab fixed-args interceptor for '${toolName}'. Runs experiment lanes with identical tool args and returns the winning lane result.`,
         parameters: support.parameters,
         async execute(toolCallId, params, signal, onUpdate, execCtx) {
+          if (getBuiltinRoutingMode(toolName) === "native" && support.nativeTool) {
+            return support.nativeTool.execute(toolCallId, params, signal, onUpdate, execCtx);
+          }
           return runFixedArgsToolExperiment(
             params as Record<string, unknown>,
             toolName,
@@ -1999,6 +2279,11 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
       .filter((e) => toolNameOf(e.experiment) === "edit");
 
     if (editExperiments.length > 0) {
+      builtinRoutingSupport.set("edit", {
+        supportsToggle: true,
+        reason: "edit lab/native routing available",
+      });
+
       const hasProxyEditExperiment = editExperiments.some((e) => {
         const strategy = canonicalExecutionStrategy(executionStrategyOf(e.experiment));
         return strategy === "lane_single_call" || strategy === "lane_multi_call";
@@ -2029,10 +2314,19 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
         async execute(toolCallId, params, signal, onUpdate, execCtx) {
           const nativeEdit = createEditTool(execCtx.cwd);
 
+          if (getBuiltinRoutingMode("edit") === "native") {
+            if (!isExactEditInput(params)) {
+              throw new Error("Native edit routing only supports exact path/oldText/newText. Switch builtin routing for 'edit' back to 'lab' for task/context/constraints edit flows.");
+            }
+            rememberEditRouting("native", "builtin routing preference forced native edit");
+            return nativeEdit.execute(toolCallId, params, signal, onUpdate);
+          }
+
           if (process.env.PI_LAB_LANE === "1" || process.env.PI_LAB_GRADER === "1") {
             if (!isExactEditInput(params)) {
               throw new Error("In PI_LAB_LANE / PI_LAB_GRADER mode, edit requires path/oldText/newText.");
             }
+            rememberEditRouting("native", "lane/grader mode bypasses the main-session edit interceptor");
             return nativeEdit.execute(toolCallId, params, signal, onUpdate);
           }
 
@@ -2065,19 +2359,33 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
           const now = Date.now();
           const loaded = selectExperimentForEdit(execCtx.cwd, params, now, cooldownState, { experimentDirs });
           if (!loaded) {
+            rememberEditRouting("native", "no active edit experiment matched this exact edit input");
             return nativeEdit.execute(toolCallId, params, signal, onUpdate);
           }
 
           const experiment = loaded.experiment;
           cooldownState.set(experiment.id, now);
 
-          const run = createRunContext(execCtx.cwd, experiment.id, loaded.source);
+          const editExecution = await resolveEditExecutionContext(execCtx.cwd, params.path, signal);
+          const effectiveEditArgs = {
+            path: editExecution.normalizedPath,
+            oldText: params.oldText,
+            newText: params.newText,
+          };
+
+          const run = createRunContext(editExecution.executionCwd, experiment.id, loaded.source);
           writeRunManifest(run, experiment, {
             source: loaded.source,
             config_path: loaded.path,
             configured_winner_mode: winnerModeOf(experiment),
             intercepted_tool: "edit",
-            intercepted_args: { path: params.path, oldText_len: params.oldText.length, newText_len: params.newText.length },
+            intercepted_args: {
+              path: params.path,
+              effective_path: effectiveEditArgs.path,
+              execution_cwd: editExecution.executionCwd,
+              oldText_len: params.oldText.length,
+              newText_len: params.newText.length,
+            },
             execution_strategy: canonicalExecutionStrategy(executionStrategyOf(experiment)),
             lane_harness: process.env.PI_LAB_LANE_HARNESS ?? inferLaneHarness(executionStrategyOf(experiment)),
             stage: "started",
@@ -2085,7 +2393,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
 
           const policy = defaultPolicy(experiment);
           const laneStatusKey = "lab-lanes";
-          const gitRepo = await detectGitRepository(execCtx.cwd, signal);
+          const gitRepo = await detectGitRepository(editExecution.executionCwd, signal);
 
           if (!gitRepo.ok) {
             const warning = nonGitBaselineFallbackMessage(gitRepo.error);
@@ -2094,8 +2402,8 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
             const fallback = await runBaselineEditFallbackNoGit(
               loaded,
               run,
-              execCtx.cwd,
-              { path: params.path, oldText: params.oldText, newText: params.newText },
+              editExecution.executionCwd,
+              effectiveEditArgs,
               signal,
             );
             const lanes = [fallback.lane];
@@ -2112,7 +2420,11 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
             });
 
             if (fallback.lane.status !== "success") {
-              throw new Error(`Baseline lane failed while running outside a git repo: ${fallback.lane.error ?? "unknown error"}`);
+              rememberEditRouting("lab-failed", "baseline no-git fallback lane failed", {
+                experimentId: experiment.id,
+                runId: run.runId,
+              });
+              throw new Error(`Baseline lane failed while running without a git-backed execution root: ${fallback.lane.error ?? "unknown error"}`);
             }
 
             const summaryMarkdown = buildExperimentSummaryMarkdown(
@@ -2126,6 +2438,13 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
               },
               run.dir,
             );
+
+            rememberEditRouting("lab", "baseline no-git fallback intercepted the edit", {
+              experimentId: experiment.id,
+              runId: run.runId,
+              winnerLaneId: fallback.lane.lane_id,
+              winnerMode: "baseline-no-git-fallback",
+            });
 
             return {
               content: [{ type: "text", text: combineToolTextWithSummary(fallback.lane.output_text ?? `Successfully replaced text in ${params.path}.`, summaryMarkdown) }],
@@ -2149,9 +2468,9 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
             const lanes = await runExperimentLanes(
               loaded,
               run,
-              execCtx.cwd,
+              editExecution.executionCwd,
               execCtx.sessionManager.getSessionFile(),
-              { path: params.path, oldText: params.oldText, newText: params.newText },
+              effectiveEditArgs,
               signal,
               (snapshot) => {
                 updateLaneWidget(execCtx, laneStatusKey, experiment.id, snapshot);
@@ -2163,7 +2482,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
               ...summarizeLaneFailures(lanes),
             });
 
-            const winner = await selectWinner(loaded, run, execCtx.cwd, lanes, { intercepted_tool: "edit", intercepted_args: params as Record<string, unknown> }, execCtx.model, signal);
+            const winner = await selectWinner(loaded, run, editExecution.executionCwd, lanes, { intercepted_tool: "edit", intercepted_args: params as Record<string, unknown> }, execCtx.model, signal);
             const selected = laneById(lanes, winner.winner_lane_id);
             if (!selected) {
               throw new Error(`Winner lane ${winner.winner_lane_id} not found.`);
@@ -2181,13 +2500,13 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
 
             const selectedPatchPath = selected.patch_path && (selected.patch_bytes ?? 0) > 0 ? selected.patch_path : undefined;
             if (selectedPatchPath) {
-              const apply = await applyPatchToMain(execCtx.cwd, selectedPatchPath, signal);
+              const apply = await applyPatchToMain(editExecution.applyCwd, selectedPatchPath, signal);
               if (!apply.ok) {
                 if (policy.on_winner_apply_failure === "fallback_baseline_then_fail") {
                   const baseline = laneById(lanes, getBaselineLaneId(experiment));
                   const baselinePatchPath = baseline?.patch_path && (baseline.patch_bytes ?? 0) > 0 ? baseline.patch_path : undefined;
                   if (baseline && baselinePatchPath && baselinePatchPath !== selectedPatchPath) {
-                    const fallbackApply = await applyPatchToMain(execCtx.cwd, baselinePatchPath, signal);
+                    const fallbackApply = await applyPatchToMain(editExecution.applyCwd, baselinePatchPath, signal);
                     if (fallbackApply.ok) {
                       returnedLane = baseline;
                       returnedWinnerMode = `${winner.mode_used} + baseline-apply-fallback`;
@@ -2233,6 +2552,13 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
               run.dir,
             );
 
+            rememberEditRouting("lab", fallbackApplied ? "lab intercepted the edit and applied the baseline fallback patch" : "lab intercepted the edit", {
+              experimentId: experiment.id,
+              runId: run.runId,
+              winnerLaneId: returnedLane.lane_id,
+              winnerMode: returnedWinnerMode,
+            });
+
             return {
               content: [{ type: "text", text: combineToolTextWithSummary(returnedLane.output_text ?? `Successfully replaced text in ${params.path}.`, summaryMarkdown) }],
               details: {
@@ -2256,6 +2582,10 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
               stage: "failed",
               error: errorText,
               fallback_reason_code: "ab_failed_no_fallback",
+            });
+            rememberEditRouting("lab-failed", errorText, {
+              experimentId: experiment.id,
+              runId: run.runId,
             });
             throw err;
           } finally {
@@ -2290,6 +2620,98 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
         "info",
       );
     }
+  }
+
+  function formatBuiltinInterceptionChoice(name: string): string {
+    const state = builtinToolState(name);
+    return `${name} · ${state.activeStateLabel} · ${state.routingLabel}`;
+  }
+
+  async function showBuiltinToolMenu(ctx: any, name: string) {
+    while (true) {
+      const state = builtinToolState(name);
+      const choice = await ctx.ui.select(`builtin: ${name}`, [
+        `Active: ${state.active ? "enabled" : "disabled"}`,
+        `Routing: ${state.routingLabel}`,
+        "Show details",
+      ]);
+      if (!choice) return;
+
+      if (choice.startsWith("Active:")) {
+        const enabled = !state.active;
+        setBuiltinToolEnabled(name, enabled);
+        ctx.ui.notify(`Builtin tool '${name}' ${enabled ? "enabled" : "disabled"} for this session.`, "info");
+        continue;
+      }
+
+      if (choice.startsWith("Routing:")) {
+        if (!state.routingSupport?.supportsToggle) {
+          ctx.ui.notify(`Builtin tool '${name}' does not currently expose a lab/native routing toggle.`, "warning");
+          continue;
+        }
+        const nextMode = state.routingMode === "lab" ? "native" : "lab";
+        setBuiltinRoutingMode(name, nextMode);
+        await refreshLabSessionTools(ctx);
+        ctx.ui.notify(`Builtin tool '${name}' routing set to ${nextMode}.`, "info");
+        continue;
+      }
+
+      if (choice === "Show details") {
+        ctx.ui.notify(state.description, "info");
+      }
+    }
+  }
+
+  async function showBuiltinInterceptionMenu(ctx: any) {
+    while (true) {
+      refreshKnownBuiltinTools();
+      const builtinNames = Array.from(knownBuiltinTools.keys()).sort((a, b) => a.localeCompare(b));
+      if (builtinNames.length === 0) {
+        ctx.ui.notify("No builtin tools are currently known to this session.", "warning");
+        return;
+      }
+
+      const choices = builtinNames.map((name) => formatBuiltinInterceptionChoice(name));
+      const choice = await ctx.ui.select("Intercept builtins", choices);
+      if (!choice) return;
+      const index = choices.indexOf(choice);
+      if (index < 0) continue;
+      await showBuiltinToolMenu(ctx, builtinNames[index]);
+    }
+  }
+
+  async function showToolsMenu(ctx: any) {
+    while (true) {
+      const choice = await ctx.ui.select("pi-lab tools", [
+        "Show current edit/runtime status",
+        "Intercept builtins",
+        "Reapply lab tool registration for this session",
+      ]);
+      if (!choice) return;
+
+      if (choice === "Show current edit/runtime status") {
+        ctx.ui.notify(buildEditRuntimeStatusLines(ctx).join("\n"), "info");
+        continue;
+      }
+
+      if (choice === "Intercept builtins") {
+        await showBuiltinInterceptionMenu(ctx);
+        continue;
+      }
+
+      if (choice === "Reapply lab tool registration for this session") {
+        await refreshLabSessionTools(ctx);
+        ctx.ui.notify("Reapplied pi-lab tool registration for this session.", "info");
+      }
+    }
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    await refreshLabSessionTools(ctx);
+  });
+
+  pi.on("session_switch", async (_event, ctx) => {
+    await refreshLabSessionTools(ctx);
   });
 
   pi.registerCommand("lab", {
@@ -2299,10 +2721,10 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
 
       if (!cmd) {
         if (ctx.hasUI) {
-          await showLabsMenu(pi, ctx, experimentDirs);
+          await showLabsMenu(pi, ctx, experimentDirs, () => showToolsMenu(ctx));
           return;
         }
-        ctx.ui.notify("Usage: /lab (interactive) or /lab create | experiments | runs | maintenance", "warning");
+        ctx.ui.notify("Usage: /lab (interactive) or /lab create | experiments | runs | maintenance | tools", "warning");
         return;
       }
 
@@ -2397,12 +2819,54 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
           return;
         }
 
-        ctx.ui.notify(`Experiment '${experimentId}' is now ${result.enabled ? "enabled" : "disabled"}.`, "info");
+        await refreshLabSessionTools(ctx);
+        ctx.ui.notify(`Experiment '${experimentId}' is now ${result.enabled ? "enabled" : "disabled"}. Reapplied lab tool registration for this session.`, "info");
         return;
       }
 
       if (cmd === "runs") {
         await showRunsMenu(ctx);
+        return;
+      }
+
+      if (cmd === "tools" || cmd.startsWith("tools ")) {
+        const toolCmd = cmd.slice("tools".length).trim().toLowerCase();
+        if (!toolCmd && ctx.hasUI) {
+          await showToolsMenu(ctx);
+          return;
+        }
+        if (!toolCmd || toolCmd === "status") {
+          ctx.ui.notify(buildEditRuntimeStatusLines(ctx).join("\n"), "info");
+          return;
+        }
+        if (toolCmd === "builtins" || toolCmd === "intercept-builtins") {
+          if (ctx.hasUI) {
+            await showBuiltinInterceptionMenu(ctx);
+            return;
+          }
+          const lines = Array.from(knownBuiltinTools.keys())
+            .sort((a, b) => a.localeCompare(b))
+            .map((name) => {
+              const state = builtinToolState(name);
+              return `- ${name}: ${state.activeStateLabel}; routing=${state.routingLabel}; state=${state.effectiveState}`;
+            });
+          ctx.ui.notify(lines.length > 0 ? lines.join("\n") : "No builtin tools are currently known to this session.", "info");
+          return;
+        }
+        if (toolCmd === "refresh" || toolCmd === "reapply") {
+          await refreshLabSessionTools(ctx);
+          ctx.ui.notify("Reapplied pi-lab tool registration for this session.", "info");
+          return;
+        }
+        if (toolCmd === "toggle" || toolCmd === "on" || toolCmd === "off") {
+          const current = getBuiltinRoutingMode("edit");
+          const nextMode = toolCmd === "toggle" ? (current === "lab" ? "native" : "lab") : toolCmd === "on" ? "lab" : "native";
+          setBuiltinRoutingMode("edit", nextMode);
+          await refreshLabSessionTools(ctx);
+          ctx.ui.notify(`Builtin tool 'edit' routing set to ${nextMode}.`, "info");
+          return;
+        }
+        ctx.ui.notify("Usage: /lab tools [status|builtins|refresh|toggle|on|off]", "warning");
         return;
       }
 
@@ -2417,7 +2881,7 @@ function createLabConductorExtension(pi: ExtensionAPI, experimentDirs?: string[]
         return;
       }
 
-      ctx.ui.notify("Usage: /lab create | experiments | runs | maintenance", "warning");
+      ctx.ui.notify("Usage: /lab create | experiments | runs | maintenance | tools", "warning");
     },
   });
 }

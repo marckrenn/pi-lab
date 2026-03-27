@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -9,6 +9,8 @@ import {
   detectGitRepository,
   directHarnessFallbackReasonForError,
   loadLaneToolsDirect,
+  resolveEditExecutionContext,
+  resolveFlowToolExecutionContext,
   resolveLaneModelOverride,
   resolveLaneThinkingOverride,
   runBaselineFixedArgsFallbackNoGit,
@@ -84,6 +86,149 @@ describe("direct lane harness extension compatibility checks", () => {
     if (!detected.ok) {
       expect(detected.error).toContain("not a git repository");
     }
+  });
+
+  test("resolveEditExecutionContext switches to the target file git repo for absolute paths", async () => {
+    const callerRepo = createTempDir();
+    const targetRepo = createTempDir();
+    execSync("git init", { cwd: callerRepo, stdio: "ignore" });
+    execSync("git init", { cwd: targetRepo, stdio: "ignore" });
+
+    mkdirSync(join(targetRepo, "playground"), { recursive: true });
+    const targetFile = join(targetRepo, "playground", "article.md");
+    writeFileSync(targetFile, "hello\n", "utf8");
+
+    const resolved = await resolveEditExecutionContext(callerRepo, targetFile);
+
+    expect(realpathSync(resolved.executionCwd)).toBe(realpathSync(targetRepo));
+    expect(realpathSync(resolved.applyCwd)).toBe(realpathSync(targetRepo));
+    expect(resolved.normalizedPath).toBe("playground/article.md");
+    expect(realpathSync(resolved.targetFilePath)).toBe(realpathSync(targetFile));
+    expect(resolved.targetGit.ok).toBe(true);
+  });
+
+  test("resolveEditExecutionContext falls back to the target parent dir for absolute non-git paths", async () => {
+    const callerRepo = createTempDir();
+    const externalDir = createTempDir();
+    execSync("git init", { cwd: callerRepo, stdio: "ignore" });
+
+    const targetFile = join(externalDir, "note.md");
+    writeFileSync(targetFile, "hello\n", "utf8");
+
+    const resolved = await resolveEditExecutionContext(callerRepo, targetFile);
+
+    expect(realpathSync(resolved.executionCwd)).toBe(realpathSync(externalDir));
+    expect(realpathSync(resolved.applyCwd)).toBe(realpathSync(externalDir));
+    expect(resolved.normalizedPath).toBe("note.md");
+    expect(realpathSync(resolved.targetFilePath)).toBe(realpathSync(targetFile));
+    expect(resolved.targetGit.ok).toBe(false);
+  });
+
+  test("resolveFlowToolExecutionContext rewrites cross-repo edit flow prompts to the target repo path", async () => {
+    const callerRepo = createTempDir();
+    const targetRepo = createTempDir();
+    execSync("git init", { cwd: callerRepo, stdio: "ignore" });
+    execSync("git init", { cwd: targetRepo, stdio: "ignore" });
+
+    mkdirSync(join(targetRepo, "playground"), { recursive: true });
+    const targetFile = join(targetRepo, "playground", "basic.txt");
+    writeFileSync(targetFile, "alpha\n", "utf8");
+
+    const resolved = await resolveFlowToolExecutionContext(
+      callerRepo,
+      "edit",
+      {
+        task: "Apply harmless dummy edits to the target file.",
+        context: `Previously I edited ${targetFile} in another repo.`,
+        constraints: `Only modify ${targetFile}. Keep the edits simple.`,
+      },
+    );
+
+    expect(realpathSync(resolved.executionCwd)).toBe(realpathSync(targetRepo));
+    expect(realpathSync(resolved.applyCwd)).toBe(realpathSync(targetRepo));
+    expect(resolved.matchedPath).toBe(targetFile);
+    expect(resolved.normalizedPath).toBe("playground/basic.txt");
+    expect(realpathSync(resolved.targetFilePath ?? targetFile)).toBe(realpathSync(targetFile));
+    expect(resolved.flowArgs.constraints).toContain("playground/basic.txt");
+    expect(resolved.flowArgs.constraints).not.toContain(targetFile);
+    expect(resolved.flowArgs.context).toContain("playground/basic.txt");
+    expect(resolved.flowArgs.context).not.toContain(targetFile);
+  });
+
+  test("resolveFlowToolExecutionContext honors explicit edit path even when task text has no path", async () => {
+    const callerRepo = createTempDir();
+    const targetRepo = createTempDir();
+    execSync("git init", { cwd: callerRepo, stdio: "ignore" });
+    execSync("git init", { cwd: targetRepo, stdio: "ignore" });
+
+    mkdirSync(join(targetRepo, "playground"), { recursive: true });
+    const targetFile = join(targetRepo, "playground", "basic.txt");
+    writeFileSync(targetFile, "alpha\n", "utf8");
+
+    const resolved = await resolveFlowToolExecutionContext(callerRepo, "edit", {
+      task: "Make a few harmless dummy edits to this text file.",
+      path: targetFile,
+      context: "Current file has four short placeholder lines.",
+      constraints: "Keep it plain text and make small obvious dummy changes only.",
+    });
+
+    expect(realpathSync(resolved.executionCwd)).toBe(realpathSync(targetRepo));
+    expect(realpathSync(resolved.applyCwd)).toBe(realpathSync(targetRepo));
+    expect(resolved.matchedPath).toBe(targetFile);
+    expect(resolved.normalizedPath).toBe("playground/basic.txt");
+    expect(resolved.flowArgs.path).toBe("playground/basic.txt");
+  });
+
+  test("resolveFlowToolExecutionContext leaves edit flow prompts unchanged when target paths are ambiguous", async () => {
+    const callerRepo = createTempDir();
+    const targetRepoA = createTempDir();
+    const targetRepoB = createTempDir();
+    execSync("git init", { cwd: callerRepo, stdio: "ignore" });
+    execSync("git init", { cwd: targetRepoA, stdio: "ignore" });
+    execSync("git init", { cwd: targetRepoB, stdio: "ignore" });
+
+    mkdirSync(join(targetRepoA, "playground"), { recursive: true });
+    mkdirSync(join(targetRepoB, "playground"), { recursive: true });
+    const targetFileA = join(targetRepoA, "playground", "a.txt");
+    const targetFileB = join(targetRepoB, "playground", "b.txt");
+    writeFileSync(targetFileA, "a\n", "utf8");
+    writeFileSync(targetFileB, "b\n", "utf8");
+
+    const flowArgs = {
+      task: `Touch ${targetFileA} and ${targetFileB}.`,
+      constraints: `Only modify ${targetFileA} or ${targetFileB}.`,
+    };
+
+    const resolved = await resolveFlowToolExecutionContext(callerRepo, "edit", flowArgs);
+
+    expect(realpathSync(resolved.executionCwd)).toBe(realpathSync(callerRepo));
+    expect(realpathSync(resolved.applyCwd)).toBe(realpathSync(callerRepo));
+    expect(resolved.matchedPath).toBeUndefined();
+    expect(resolved.normalizedPath).toBeUndefined();
+    expect(resolved.flowArgs).toEqual(flowArgs);
+  });
+
+  test("resolveFlowToolExecutionContext ignores slash-words like dummy/test and wording/casing", async () => {
+    const callerRepo = createTempDir();
+    const targetRepo = createTempDir();
+    execSync("git init", { cwd: callerRepo, stdio: "ignore" });
+    execSync("git init", { cwd: targetRepo, stdio: "ignore" });
+
+    mkdirSync(join(targetRepo, "playground"), { recursive: true });
+    const targetFile = join(targetRepo, "playground", "basic.txt");
+    writeFileSync(targetFile, "alpha\n", "utf8");
+
+    const resolved = await resolveFlowToolExecutionContext(callerRepo, "edit", {
+      task: "Make harmless dummy/test edits and tweak wording/casing on a couple of lines.",
+      context: `Current file is ${targetFile}.`,
+      constraints: `Only modify ${targetFile}. Keep the edits simple.`,
+    });
+
+    expect(realpathSync(resolved.executionCwd)).toBe(realpathSync(targetRepo));
+    expect(resolved.matchedPath).toBe(targetFile);
+    expect(resolved.normalizedPath).toBe("playground/basic.txt");
+    expect(resolved.flowArgs.task).toContain("dummy/test");
+    expect(resolved.flowArgs.task).toContain("wording/casing");
   });
 
   test("resolveLaneModelOverride prefers explicit lane model and otherwise inherits the main model", () => {
